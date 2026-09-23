@@ -1,3 +1,4 @@
+.gitignore
 *.class
 bin/
 out/
@@ -7,3 +8,4 @@ out/
 projectsubject.md
 implementation_example.md
 audit_subject.md
+task.md
