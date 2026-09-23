@@ -1,6 +1,8 @@
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
 import java.util.Iterator;
 import java.util.Set;
 
@@ -8,6 +10,7 @@ public class Server {
     private int port;
     private boolean isRunning;
     private Selector selector;
+    private ServerSocketChannel serverChannel;
 
     public Server(int port) {
         this.port = port;
@@ -17,8 +20,17 @@ public class Server {
     public void start() throws IOException {
         // open the single selector
         this.selector = Selector.open();
+
+        // create and configure the listening server socket
+        this.serverChannel = ServerSocketChannel.open();
+        this.serverChannel.configureBlocking(false); // non-blocking mode
+        this.serverChannel.bind(new InetSocketAddress(this.port));
+
+        // register server socket with selector for incoming connections
+        this.serverChannel.register(this.selector, SelectionKey.OP_ACCEPT);
+
         this.isRunning = true;
-        System.out.println("Server started on port " + this.port);
+        System.out.println("Server listening on port " + this.port);
 
         // main event loop
         while (this.isRunning) {
@@ -33,20 +45,31 @@ public class Server {
 
             while (it.hasNext()) {
                 SelectionKey key = it.next();
-                // must remove processed key
                 it.remove();
 
                 if (!key.isValid()) {
                     continue;
                 }
 
-                // will handle accept, read, write in next steps
+                // check if a client wants to connect
+                if (key.isAcceptable()) {
+                    // will accept the client in the next commit
+                }
             }
         }
     }
 
     public void stop() {
         this.isRunning = false;
+
+        if (this.serverChannel != null && this.serverChannel.isOpen()) {
+            try {
+                this.serverChannel.close();
+            } catch (IOException e) {
+                System.err.println("Error closing server channel: " + e.getMessage());
+            }
+        }
+
         if (this.selector != null && this.selector.isOpen()) {
             try {
                 this.selector.close();
