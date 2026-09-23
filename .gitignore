@@ -1,0 +1,9 @@
+*.class
+bin/
+out/
+.vscode/
+.idea/
+*.log
+projectsubject.md
+implementation_example.md
+audit_subject.md
