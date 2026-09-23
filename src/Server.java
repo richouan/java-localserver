@@ -57,17 +57,19 @@ public class Server {
         }
     }
 
-    // accept new client connection
+    // accept new client connection and attach a Client state object
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel = server.accept();
 
         if (clientChannel != null) {
-            // configure client socket as non-blocking
             clientChannel.configureBlocking(false);
 
-            // register with the SAME selector for OP_READ
-            clientChannel.register(this.selector, SelectionKey.OP_READ);
+            // create a new Client state object
+            Client client = new Client(clientChannel);
+
+            // register with selector and attach the client object to this key
+            clientChannel.register(this.selector, SelectionKey.OP_READ, client);
             System.out.println("New client connected: " + clientChannel.getRemoteAddress());
         }
     }
