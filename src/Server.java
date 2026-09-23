@@ -3,6 +3,7 @@ import java.net.InetSocketAddress;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Set;
 
@@ -18,23 +19,17 @@ public class Server {
     }
 
     public void start() throws IOException {
-        // open the single selector
         this.selector = Selector.open();
 
-        // create and configure the listening server socket
         this.serverChannel = ServerSocketChannel.open();
-        this.serverChannel.configureBlocking(false); // non-blocking mode
+        this.serverChannel.configureBlocking(false);
         this.serverChannel.bind(new InetSocketAddress(this.port));
-
-        // register server socket with selector for incoming connections
         this.serverChannel.register(this.selector, SelectionKey.OP_ACCEPT);
 
         this.isRunning = true;
         System.out.println("Server listening on port " + this.port);
 
-        // main event loop
         while (this.isRunning) {
-            // wait up to 1 second for I/O events
             int ready = this.selector.select(1000);
             if (ready == 0) {
                 continue;
@@ -51,11 +46,29 @@ public class Server {
                     continue;
                 }
 
-                // check if a client wants to connect
-                if (key.isAcceptable()) {
-                    // will accept the client in the next commit
+                try {
+                    if (key.isAcceptable()) {
+                        handleAccept(key);
+                    }
+                } catch (IOException e) {
+                    System.err.println("Error handling connection: " + e.getMessage());
                 }
             }
+        }
+    }
+
+    // accept new client connection
+    private void handleAccept(SelectionKey key) throws IOException {
+        ServerSocketChannel server = (ServerSocketChannel) key.channel();
+        SocketChannel clientChannel = server.accept();
+
+        if (clientChannel != null) {
+            // configure client socket as non-blocking
+            clientChannel.configureBlocking(false);
+
+            // register with the SAME selector for OP_READ
+            clientChannel.register(this.selector, SelectionKey.OP_READ);
+            System.out.println("New client connected: " + clientChannel.getRemoteAddress());
         }
     }
 
