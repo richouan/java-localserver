@@ -1,5 +1,6 @@
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -22,6 +23,9 @@ public class Client {
     private String path;
     private String version;
     private Map<String, String> headers;
+
+    // Outgoing response buffer
+    private ByteBuffer responseBuffer;
 
     public Client(SocketChannel channel) {
         this.channel = channel;
@@ -74,6 +78,32 @@ public class Client {
 
     public Map<String, String> getHeaders() {
         return this.headers;
+    }
+
+    public ByteBuffer getResponseBuffer() {
+        return this.responseBuffer;
+    }
+
+    // Prepare a simple HTTP response
+    public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+
+        StringBuilder res = new StringBuilder();
+        res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
+        res.append("Content-Type: ").append(contentType).append("\r\n");
+        res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
+        res.append("Connection: close\r\n");
+        res.append("\r\n");
+
+        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
+
+        // Allocate a buffer holding headers + body
+        this.responseBuffer = ByteBuffer.allocate(headerBytes.length + bodyBytes.length);
+        this.responseBuffer.put(headerBytes);
+        this.responseBuffer.put(bodyBytes);
+        this.responseBuffer.flip(); // ready to write
+
+        this.state = State.WRITING_RESPONSE;
     }
 
     // Parse HTTP headers once \r\n\r\n is found

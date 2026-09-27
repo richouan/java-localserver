@@ -53,6 +53,8 @@ public class Server {
                         handleAccept(key);
                     } else if (key.isReadable()) {
                         handleRead(key);
+                    } else if (key.isWritable()) {
+                        handleWrite(key);
                     }
                 } catch (IOException e) {
                     System.err.println("Error handling client: " + e.getMessage());
@@ -74,7 +76,7 @@ public class Server {
         }
     }
 
-    // Read incoming request data non-blockingly (1 read per select)
+    // Read incoming request data (1 read per select)
     private void handleRead(SelectionKey key) throws IOException {
         Client client = (Client) key.attachment();
         SocketChannel channel = client.getChannel();
@@ -83,7 +85,6 @@ public class Server {
         buffer.clear();
         int bytesRead = channel.read(buffer);
 
-        // Client closed connection
         if (bytesRead == -1) {
             closeClient(key);
             return;
@@ -95,17 +96,40 @@ public class Server {
 
         client.updateActivity();
 
-        // Convert read bytes to string and append to rawRequest
         buffer.flip();
         byte[] bytes = new byte[buffer.remaining()];
         buffer.get(bytes);
         client.getRawRequest().append(new String(bytes, StandardCharsets.UTF_8));
 
-        // Check if full headers have arrived (\r\n\r\n)
+        // When headers are complete, prepare response and switch to OP_WRITE
         if (client.getState() == Client.State.READING_HEADERS) {
             if (client.parseHeaders()) {
                 System.out.println("Parsed request: " + client.getMethod() + " " + client.getPath() + " (" + client.getVersion() + ")");
+                
+                // Prepare a simple 200 OK test response
+                String html = "<html><body><h1>Hello from LocalServer!</h1><p>You requested: " 
+                              + client.getPath() + "</p></body></html>";
+                client.prepareResponse(200, "OK", html, "text/html");
+
+                // Switch registration to OP_WRITE so selector tells us when socket is ready for writing
+                key.interestOps(SelectionKey.OP_WRITE);
             }
+        }
+    }
+
+    // Write outgoing response (1 write per select)
+    private void handleWrite(SelectionKey key) throws IOException {
+        Client client = (Client) key.attachment();
+        SocketChannel channel = client.getChannel();
+        ByteBuffer buffer = client.getResponseBuffer();
+
+        if (buffer != null && buffer.hasRemaining()) {
+            channel.write(buffer);
+        }
+
+        // If all bytes written, close connection (HTTP Connection: close)
+        if (buffer == null || !buffer.hasRemaining()) {
+            closeClient(key);
         }
     }
 
