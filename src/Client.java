@@ -1,5 +1,4 @@
-import java.io.File;
-import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -14,8 +13,7 @@ public class Client {
     public enum State {
         READING_HEADERS,
         READING_BODY,
-        WRITING_RESPONSE,
-        CLOSED
+        WRITING_RESPONSE
     }
 
     private SocketChannel channel;
@@ -35,10 +33,8 @@ public class Client {
     private FileChannel fileChannel;
     private long fileBytesRemaining;
 
-    private File tempBodyFile;
-    private FileOutputStream tempBodyOut;
+    private ByteArrayOutputStream requestBody;
     private long contentLength;
-    private long bodyBytesRead;
 
     public Client(SocketChannel channel) {
         this.channel = channel;
@@ -46,10 +42,10 @@ public class Client {
         this.readBuffer = ByteBuffer.allocate(8192);
         this.rawRequest = new StringBuilder();
         this.headers = new HashMap<>();
+        this.requestBody = new ByteArrayOutputStream();
         this.lastActiveTime = System.currentTimeMillis();
         this.keepAlive = false;
         this.contentLength = 0;
-        this.bodyBytesRead = 0;
     }
 
     public SocketChannel getChannel() {
@@ -116,46 +112,24 @@ public class Client {
         this.fileBytesRemaining -= count;
     }
 
-    public File getTempBodyFile() {
-        return this.tempBodyFile;
-    }
-
     public long getContentLength() {
         return this.contentLength;
     }
 
-    public long getBodyBytesRead() {
-        return this.bodyBytesRead;
+    public void appendBody(byte[] data, int offset, int length) {
+        this.requestBody.write(data, offset, length);
     }
 
-    public void appendBodyBytes(byte[] data, int offset, int length) throws IOException {
-        if (this.tempBodyOut == null) {
-            this.tempBodyFile = File.createTempFile("localserver_body_", ".tmp");
-            this.tempBodyOut = new FileOutputStream(this.tempBodyFile);
-        }
-        this.tempBodyOut.write(data, offset, length);
-        this.bodyBytesRead += length;
+    public int getBodySize() {
+        return this.requestBody.size();
+    }
+
+    public byte[] getBody() {
+        return this.requestBody.toByteArray();
     }
 
     public boolean isBodyComplete() {
-        return this.bodyBytesRead >= this.contentLength;
-    }
-
-    public void closeBodyStream() {
-        if (this.tempBodyOut != null) {
-            try {
-                this.tempBodyOut.close();
-            } catch (IOException ignored) {}
-            this.tempBodyOut = null;
-        }
-    }
-
-    public void deleteTempBody() {
-        closeBodyStream();
-        if (this.tempBodyFile != null && this.tempBodyFile.exists()) {
-            this.tempBodyFile.delete();
-            this.tempBodyFile = null;
-        }
+        return this.requestBody.size() >= this.contentLength;
     }
 
     public void closeFileChannel() {
@@ -168,7 +142,6 @@ public class Client {
 
     public void resetForNextRequest() {
         closeFileChannel();
-        deleteTempBody();
         this.fileChannel = null;
         this.fileBytesRemaining = 0;
         this.responseBuffer = null;
@@ -177,8 +150,8 @@ public class Client {
         this.version = null;
         this.headers.clear();
         this.rawRequest.setLength(0);
+        this.requestBody.reset();
         this.contentLength = 0;
-        this.bodyBytesRead = 0;
         this.state = State.READING_HEADERS;
         this.lastActiveTime = System.currentTimeMillis();
     }
@@ -210,7 +183,6 @@ public class Client {
 
         byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
         this.responseBuffer = ByteBuffer.wrap(headerBytes);
-
         this.state = State.WRITING_RESPONSE;
     }
 
