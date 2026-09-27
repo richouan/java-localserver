@@ -1,9 +1,11 @@
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Set;
 
@@ -49,28 +51,70 @@ public class Server {
                 try {
                     if (key.isAcceptable()) {
                         handleAccept(key);
+                    } else if (key.isReadable()) {
+                        handleRead(key);
                     }
                 } catch (IOException e) {
-                    System.err.println("Error handling connection: " + e.getMessage());
+                    System.err.println("Error handling client: " + e.getMessage());
+                    closeClient(key);
                 }
             }
         }
     }
 
-    // accept new client connection and attach a Client state object
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel = server.accept();
 
         if (clientChannel != null) {
             clientChannel.configureBlocking(false);
-
-            // create a new Client state object
             Client client = new Client(clientChannel);
-
-            // register with selector and attach the client object to this key
             clientChannel.register(this.selector, SelectionKey.OP_READ, client);
             System.out.println("New client connected: " + clientChannel.getRemoteAddress());
+        }
+    }
+
+    // Read incoming request data non-blockingly (1 read per select)
+    private void handleRead(SelectionKey key) throws IOException {
+        Client client = (Client) key.attachment();
+        SocketChannel channel = client.getChannel();
+        ByteBuffer buffer = client.getReadBuffer();
+
+        buffer.clear();
+        int bytesRead = channel.read(buffer);
+
+        // Client closed connection
+        if (bytesRead == -1) {
+            closeClient(key);
+            return;
+        }
+
+        if (bytesRead == 0) {
+            return;
+        }
+
+        client.updateActivity();
+
+        // Convert read bytes to string and append to rawRequest
+        buffer.flip();
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        client.getRawRequest().append(new String(bytes, StandardCharsets.UTF_8));
+
+        // Check if full headers have arrived (\r\n\r\n)
+        if (client.getState() == Client.State.READING_HEADERS) {
+            if (client.parseHeaders()) {
+                System.out.println("Parsed request: " + client.getMethod() + " " + client.getPath() + " (" + client.getVersion() + ")");
+            }
+        }
+    }
+
+    private void closeClient(SelectionKey key) {
+        try {
+            key.cancel();
+            key.channel().close();
+        } catch (IOException e) {
+            // ignore cleanup errors
         }
     }
 
