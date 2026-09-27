@@ -9,9 +9,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Strongly typed configuration model supporting multiple servers and routes.
- */
 public class Config {
 
     public static class RouteRule {
@@ -29,7 +26,7 @@ public class Config {
         public int port = 8080;
         public String serverName = "";
         public String root = "www";
-        public long bodyLimit = 1048576; // 1MB default
+        public long bodyLimit = 1048576;
         public Map<Integer, String> errorPages = new HashMap<>();
         public List<RouteRule> routes = new ArrayList<>();
     }
@@ -70,7 +67,7 @@ public class Config {
                     } else if (currentSection.startsWith("route") && currentServer != null) {
                         currentRoute = new RouteRule();
                         currentRoute.path = currentSection.replace("route", "").trim();
-                        currentRoute.root = currentServer.root; // default to server root
+                        currentRoute.root = currentServer.root;
                         currentServer.routes.add(currentRoute);
                     }
                     continue;
@@ -87,6 +84,11 @@ public class Config {
                         else if (key.equals("server_name")) currentServer.serverName = value;
                         else if (key.equals("root")) currentServer.root = value;
                         else if (key.equals("body_limit")) currentServer.bodyLimit = Long.parseLong(value);
+                    } else if (currentSection.equals("error") || currentSection.equals("errors")) {
+                        try {
+                            int code = Integer.parseInt(key);
+                            currentServer.errorPages.put(code, value);
+                        } catch (NumberFormatException ignored) {}
                     } else if (currentRoute != null) {
                         if (key.equals("root")) currentRoute.root = value;
                         else if (key.equals("index")) currentRoute.index = value;

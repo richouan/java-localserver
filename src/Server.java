@@ -185,33 +185,51 @@ public class Server {
                 String hostHeader = client.getHeaders().get("host");
                 Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-                // Use the Router to match the request
                 Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
 
                 if (routeMatch.isRedirect) {
-                    // 301 Moved Permanently
                     client.prepareRedirect(routeMatch.rule.redirect);
                 } else if (!routeMatch.isMethodAllowed) {
-                    // 405 Method Not Allowed
-                    client.prepareResponse(405, "Method Not Allowed", "<h1>405 Method Not Allowed</h1>", "text/html");
+                    sendError(client, serverBlock, 405, "Method Not Allowed");
                 } else {
                     Path filePath = routeMatch.targetPath;
                     Path rootPath = Paths.get(routeMatch.rule.root).normalize();
 
-                    // Security check: path traversal
                     if (!filePath.startsWith(rootPath)) {
-                        client.prepareResponse(403, "Forbidden", "<h1>403 Forbidden</h1>", "text/html");
+                        sendError(client, serverBlock, 403, "Forbidden");
                     } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
                         String contentType = getMimeType(filePath.toString());
                         client.prepareFileResponse(200, "OK", filePath, contentType);
                     } else {
-                        client.prepareResponse(404, "Not Found", "<h1>404 Not Found</h1>", "text/html");
+                        sendError(client, serverBlock, 404, "Not Found");
                     }
                 }
 
                 key.interestOps(SelectionKey.OP_WRITE);
             }
         }
+    }
+
+    private void sendError(Client client, Config.ServerBlock serverBlock, int statusCode, String defaultReason) {
+        String customPath = null;
+        if (serverBlock != null && serverBlock.errorPages.containsKey(statusCode)) {
+            customPath = serverBlock.errorPages.get(statusCode);
+        } else {
+            String defaultErrorFile = "errors/" + statusCode + ".html";
+            if (Files.exists(Paths.get(defaultErrorFile))) {
+                customPath = defaultErrorFile;
+            }
+        }
+
+        if (customPath != null && Files.exists(Paths.get(customPath))) {
+            try {
+                client.prepareFileResponse(statusCode, defaultReason, Paths.get(customPath), "text/html");
+                return;
+            } catch (IOException ignored) {}
+        }
+
+        String fallbackHtml = "<html><body><h1>" + statusCode + " " + defaultReason + "</h1></body></html>";
+        client.prepareResponse(statusCode, defaultReason, fallbackHtml, "text/html");
     }
 
     private void handleWrite(SelectionKey key) throws IOException {
