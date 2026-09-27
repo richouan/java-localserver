@@ -139,34 +139,46 @@ public class Server {
         SocketChannel channel = client.getChannel();
         ByteBuffer headerBuffer = client.getResponseBuffer();
 
-        // 1. Send HTTP header bytes first
+        // 1. Send HTTP header bytes first (handle partial write)
         if (headerBuffer != null && headerBuffer.hasRemaining()) {
             channel.write(headerBuffer);
+            client.updateActivity();
             if (headerBuffer.hasRemaining()) {
-                return; // partial write, wait for next OP_WRITE
+                return; // still has header bytes left, resume on next OP_WRITE
             }
         }
 
         // 2. Stream static file bytes using FileChannel directly into socket
         FileChannel fileChannel = client.getFileChannel();
         if (fileChannel != null && client.getFileBytesRemaining() > 0) {
-            ByteBuffer fileBuf = client.getReadBuffer(); // reuse 8KB buffer
-            fileBuf.clear();
+            ByteBuffer fileBuf = client.getReadBuffer();
 
+            // If previous partial write still has unsent file bytes in buffer, flush them first
+            if (fileBuf.hasRemaining()) {
+                channel.write(fileBuf);
+                client.updateActivity();
+                if (fileBuf.hasRemaining()) {
+                    return; // network socket buffer full, wait for next OP_WRITE
+                }
+            }
+
+            // Read the next chunk from file
+            fileBuf.clear();
             int readFromFile = fileChannel.read(fileBuf);
             if (readFromFile > 0) {
                 fileBuf.flip();
                 channel.write(fileBuf);
                 client.decrementFileBytes(readFromFile);
+                client.updateActivity();
             }
 
-            // If more file bytes remain, stay on OP_WRITE for next selector tick
-            if (client.getFileBytesRemaining() > 0) {
+            // If more file bytes remain or buffer still has remaining bytes, wait for next OP_WRITE
+            if (client.getFileBytesRemaining() > 0 || fileBuf.hasRemaining()) {
                 return;
             }
         }
 
-        // All response bytes written
+        // All response bytes written cleanly
         closeClient(key);
     }
 
