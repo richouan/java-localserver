@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -259,6 +260,11 @@ public class Server {
         }
 
         if ("POST".equalsIgnoreCase(client.getMethod())) {
+            if (routeMatch.rule.uploadDir != null && !routeMatch.rule.uploadDir.isEmpty()) {
+                handleFileUpload(client, serverBlock, routeMatch);
+                return;
+            }
+
             String responseBody = "<html><body><h1>200 OK</h1><p>POST body received successfully (" + client.getBodySize() + " bytes).</p></body></html>";
             client.prepareResponse(200, "OK", responseBody, "text/html");
             return;
@@ -293,6 +299,67 @@ public class Server {
             client.prepareFileResponse(200, "OK", filePath, contentType);
         } else {
             sendError(client, serverBlock, 404, "Not Found");
+        }
+    }
+
+    private void handleFileUpload(Client client, Config.ServerBlock serverBlock, Router.RouteMatch routeMatch) {
+        try {
+            Path uploadDir = Paths.get(routeMatch.rule.uploadDir).normalize();
+            if (!Files.exists(uploadDir)) {
+                Files.createDirectories(uploadDir);
+            }
+
+            String contentType = client.getHeaders().getOrDefault("content-type", "");
+            byte[] body = client.getBody();
+            String fileName = null;
+            byte[] fileData = null;
+
+            if (contentType.toLowerCase().startsWith("multipart/form-data")) {
+                String bodyStr = new String(body, StandardCharsets.ISO_8859_1);
+                int fnIndex = bodyStr.indexOf("filename=\"");
+                if (fnIndex != -1) {
+                    int fnEnd = bodyStr.indexOf("\"", fnIndex + 10);
+                    if (fnEnd != -1) {
+                        fileName = Paths.get(bodyStr.substring(fnIndex + 10, fnEnd)).getFileName().toString();
+                    }
+                }
+                int headerEnd = bodyStr.indexOf("\r\n\r\n");
+                if (headerEnd != -1) {
+                    int contentStart = headerEnd + 4;
+                    int contentEnd = bodyStr.lastIndexOf("\r\n--");
+                    if (contentEnd > contentStart) {
+                        fileData = Arrays.copyOfRange(body, contentStart, contentEnd);
+                    } else {
+                        fileData = Arrays.copyOfRange(body, contentStart, body.length);
+                    }
+                }
+            }
+
+            if (fileData == null) {
+                fileData = body;
+            }
+
+            if (fileName == null || fileName.isEmpty()) {
+                Path target = routeMatch.targetPath;
+                if (target != null && !Files.isDirectory(target) && target.getFileName() != null && !target.equals(uploadDir)) {
+                    fileName = target.getFileName().toString();
+                } else {
+                    fileName = "upload_" + System.currentTimeMillis() + ".dat";
+                }
+            }
+
+            Path destFile = uploadDir.resolve(fileName).normalize();
+            if (!destFile.startsWith(uploadDir)) {
+                sendError(client, serverBlock, 403, "Forbidden");
+                return;
+            }
+
+            Files.write(destFile, fileData);
+
+            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded successfully: " + fileName + "</p></body></html>";
+            client.prepareResponse(201, "Created", responseHtml, "text/html");
+        } catch (IOException e) {
+            sendError(client, serverBlock, 500, "Internal Server Error");
         }
     }
 

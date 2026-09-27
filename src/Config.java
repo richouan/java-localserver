@@ -19,6 +19,7 @@ public class Config {
         public String redirect = null;
         public boolean listing = false;
         public String cgiExtension = null;
+        public String uploadDir = null;
     }
 
     public static class ServerBlock {
@@ -95,6 +96,7 @@ public class Config {
                         else if (key.equals("redirect")) currentRoute.redirect = value;
                         else if (key.equals("listing")) currentRoute.listing = Boolean.parseBoolean(value);
                         else if (key.equals("cgi")) currentRoute.cgiExtension = value;
+                        else if (key.equals("upload_dir") || key.equals("upload")) currentRoute.uploadDir = value;
                         else if (key.equals("methods")) {
                             currentRoute.methods.clear();
                             for (String m : value.split(",")) {
