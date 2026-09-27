@@ -183,34 +183,30 @@ public class Server {
         buffer.get(bytes);
         client.appendBytes(bytes);
 
-        String hostHeader = client.getHeaders().get("host");
-        Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
-
         if (!client.areHeadersParsed()) {
             if (!client.parseHeaders()) {
                 return;
             }
-            hostHeader = client.getHeaders().get("host");
-            serverBlock = resolveServerBlock(channel, hostHeader);
-
-            if (!client.isChunked() && client.getContentLength() > serverBlock.bodyLimit) {
-                sendError(client, serverBlock, 413, "Payload Too Large");
-                key.interestOps(SelectionKey.OP_WRITE);
-                return;
-            }
         }
 
-        if (client.areHeadersParsed()) {
-            if (client.getBodySize() > serverBlock.bodyLimit) {
-                sendError(client, serverBlock, 413, "Payload Too Large");
-                key.interestOps(SelectionKey.OP_WRITE);
-                return;
-            }
+        String hostHeader = client.getHeaders().get("host");
+        Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-            if (client.isBodyComplete()) {
-                processRequest(client, serverBlock);
-                key.interestOps(SelectionKey.OP_WRITE);
-            }
+        if (!client.isChunked() && client.getContentLength() > serverBlock.bodyLimit) {
+            sendError(client, serverBlock, 413, "Payload Too Large");
+            key.interestOps(SelectionKey.OP_WRITE);
+            return;
+        }
+
+        if (client.getBodySize() > serverBlock.bodyLimit) {
+            sendError(client, serverBlock, 413, "Payload Too Large");
+            key.interestOps(SelectionKey.OP_WRITE);
+            return;
+        }
+
+        if (client.isBodyComplete()) {
+            processRequest(client, serverBlock);
+            key.interestOps(SelectionKey.OP_WRITE);
         }
     }
 
