@@ -33,13 +33,10 @@ public class Server {
     public void start() throws IOException {
         this.selector = Selector.open();
 
-        // Track bound ports to detect duplicate port conflicts
         Set<Integer> boundPorts = new HashSet<>();
 
-        // Bind a ServerSocketChannel for each unique port across all server blocks
         for (Config.ServerBlock serverBlock : this.config.getServers()) {
             if (boundPorts.contains(serverBlock.port)) {
-                // Same physical port shared by another virtual host (valid virtual host group)
                 continue;
             }
 
@@ -48,7 +45,6 @@ public class Server {
                 ssc.configureBlocking(false);
                 ssc.bind(new InetSocketAddress(serverBlock.host, serverBlock.port));
 
-                // Register each listening socket to the SAME selector
                 ssc.register(this.selector, SelectionKey.OP_ACCEPT);
                 this.serverChannels.add(ssc);
                 boundPorts.add(serverBlock.port);
@@ -56,7 +52,6 @@ public class Server {
                 System.out.println("Listening on " + serverBlock.host + ":" + serverBlock.port);
             } catch (IOException e) {
                 System.err.println("Failed to bind port " + serverBlock.port + ": " + e.getMessage());
-                // An invalid server configuration must not destroy valid ones (audit rule)
             }
         }
 
@@ -102,7 +97,6 @@ public class Server {
         }
     }
 
-    // Resolve matching virtual server block by port and Host header
     private Config.ServerBlock resolveServerBlock(SocketChannel channel, String hostHeader) {
         int localPort = 8080;
         try {
@@ -112,7 +106,6 @@ public class Server {
             // fallback
         }
 
-        // Clean host header (strip :port if present)
         String reqHost = hostHeader;
         if (reqHost != null && reqHost.contains(":")) {
             reqHost = reqHost.substring(0, reqHost.indexOf(":")).trim();
@@ -126,7 +119,7 @@ public class Server {
                     defaultMatch = block;
                 }
                 if (reqHost != null && reqHost.equalsIgnoreCase(block.serverName)) {
-                    return block; // exact host match found!
+                    return block;
                 }
             }
         }
@@ -189,24 +182,31 @@ public class Server {
 
         if (client.getState() == Client.State.READING_HEADERS) {
             if (client.parseHeaders()) {
-                // Find matching ServerBlock based on port and Host header
                 String hostHeader = client.getHeaders().get("host");
                 Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-                String requestedPath = client.getPath();
-                if (requestedPath.equals("/")) {
-                    requestedPath = "/index.html";
-                }
+                // Use the Router to match the request
+                Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
 
-                Path filePath = Paths.get(serverBlock.root, requestedPath).normalize();
-
-                if (!filePath.startsWith(Paths.get(serverBlock.root))) {
-                    client.prepareResponse(403, "Forbidden", "<h1>403 Forbidden</h1>", "text/html");
-                } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
-                    String contentType = getMimeType(filePath.toString());
-                    client.prepareFileResponse(200, "OK", filePath, contentType);
+                if (routeMatch.isRedirect) {
+                    // 301 Moved Permanently
+                    client.prepareRedirect(routeMatch.rule.redirect);
+                } else if (!routeMatch.isMethodAllowed) {
+                    // 405 Method Not Allowed
+                    client.prepareResponse(405, "Method Not Allowed", "<h1>405 Method Not Allowed</h1>", "text/html");
                 } else {
-                    client.prepareResponse(404, "Not Found", "<h1>404 Not Found</h1>", "text/html");
+                    Path filePath = routeMatch.targetPath;
+                    Path rootPath = Paths.get(routeMatch.rule.root).normalize();
+
+                    // Security check: path traversal
+                    if (!filePath.startsWith(rootPath)) {
+                        client.prepareResponse(403, "Forbidden", "<h1>403 Forbidden</h1>", "text/html");
+                    } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
+                        String contentType = getMimeType(filePath.toString());
+                        client.prepareFileResponse(200, "OK", filePath, contentType);
+                    } else {
+                        client.prepareResponse(404, "Not Found", "<h1>404 Not Found</h1>", "text/html");
+                    }
                 }
 
                 key.interestOps(SelectionKey.OP_WRITE);

@@ -121,7 +121,6 @@ public class Client {
         }
     }
 
-    // Reset client state to wait for the next HTTP request on keep-alive
     public void resetForNextRequest() {
         closeFileChannel();
         this.fileChannel = null;
@@ -134,6 +133,20 @@ public class Client {
         this.rawRequest.setLength(0);
         this.state = State.READING_HEADERS;
         this.lastActiveTime = System.currentTimeMillis();
+    }
+
+    // Prepare a 301 Redirect response
+    public void prepareRedirect(String location) {
+        StringBuilder res = new StringBuilder();
+        res.append("HTTP/1.1 301 Moved Permanently\r\n");
+        res.append("Location: ").append(location).append("\r\n");
+        res.append("Content-Length: 0\r\n");
+        res.append("Connection: close\r\n");
+        res.append("\r\n");
+
+        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
+        this.responseBuffer = ByteBuffer.wrap(headerBytes);
+        this.state = State.WRITING_RESPONSE;
     }
 
     // Prepare a response with a FileChannel
@@ -209,14 +222,12 @@ public class Client {
             }
         }
 
-        // Determine keep-alive (HTTP/1.1 defaults to keep-alive unless Connection: close)
         String connHeader = this.headers.get("connection");
         if ("close".equalsIgnoreCase(connHeader)) {
             this.keepAlive = false;
         } else if ("keep-alive".equalsIgnoreCase(connHeader)) {
             this.keepAlive = true;
         } else {
-            // Default in HTTP/1.1 is keep-alive
             this.keepAlive = "HTTP/1.1".equalsIgnoreCase(this.version);
         }
 

@@ -2,15 +2,27 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * ServerBlock represents a virtual server block in the config file.
- * Multiple server blocks can have different ports or hostnames.
+ * Strongly typed configuration model supporting multiple servers and routes.
  */
 public class Config {
+
+    public static class RouteRule {
+        public String path = "/";
+        public String root = "www";
+        public String index = "index.html";
+        public Set<String> methods = new HashSet<>(Arrays.asList("GET"));
+        public String redirect = null;
+        public boolean listing = false;
+        public String cgiExtension = null;
+    }
 
     public static class ServerBlock {
         public String host = "127.0.0.1";
@@ -18,15 +30,17 @@ public class Config {
         public String serverName = "";
         public String root = "www";
         public long bodyLimit = 1048576; // 1MB default
-        public Map<String, String> routes = new HashMap<>();
+        public Map<Integer, String> errorPages = new HashMap<>();
+        public List<RouteRule> routes = new ArrayList<>();
     }
 
     private List<ServerBlock> servers;
 
     public Config() {
         this.servers = new ArrayList<>();
-        // Default fallback server
         ServerBlock defaultServer = new ServerBlock();
+        RouteRule defaultRoute = new RouteRule();
+        defaultServer.routes.add(defaultRoute);
         this.servers.add(defaultServer);
     }
 
@@ -35,6 +49,7 @@ public class Config {
         config.servers.clear();
 
         ServerBlock currentServer = null;
+        RouteRule currentRoute = null;
         String currentSection = "";
 
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
@@ -51,6 +66,12 @@ public class Config {
                     if (currentSection.equals("server")) {
                         currentServer = new ServerBlock();
                         config.servers.add(currentServer);
+                        currentRoute = null;
+                    } else if (currentSection.startsWith("route") && currentServer != null) {
+                        currentRoute = new RouteRule();
+                        currentRoute.path = currentSection.replace("route", "").trim();
+                        currentRoute.root = currentServer.root; // default to server root
+                        currentServer.routes.add(currentRoute);
                     }
                     continue;
                 }
@@ -66,10 +87,17 @@ public class Config {
                         else if (key.equals("server_name")) currentServer.serverName = value;
                         else if (key.equals("root")) currentServer.root = value;
                         else if (key.equals("body_limit")) currentServer.bodyLimit = Long.parseLong(value);
-                    } else if (currentSection.startsWith("route")) {
-                        String routePath = currentSection.replace("route", "").trim();
-                        if (key.equals("root")) {
-                            currentServer.routes.put(routePath, value);
+                    } else if (currentRoute != null) {
+                        if (key.equals("root")) currentRoute.root = value;
+                        else if (key.equals("index")) currentRoute.index = value;
+                        else if (key.equals("redirect")) currentRoute.redirect = value;
+                        else if (key.equals("listing")) currentRoute.listing = Boolean.parseBoolean(value);
+                        else if (key.equals("cgi")) currentRoute.cgiExtension = value;
+                        else if (key.equals("methods")) {
+                            currentRoute.methods.clear();
+                            for (String m : value.split(",")) {
+                                currentRoute.methods.add(m.trim().toUpperCase());
+                            }
                         }
                     }
                 }
