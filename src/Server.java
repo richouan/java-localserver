@@ -10,7 +10,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 
 public class Server {
@@ -18,6 +20,9 @@ public class Server {
     private boolean isRunning;
     private Selector selector;
     private ServerSocketChannel serverChannel;
+
+    // Timeout duration in milliseconds (30 seconds)
+    private static final long TIMEOUT_MS = 30000;
 
     public Server(int port) {
         this.port = port;
@@ -37,6 +42,10 @@ public class Server {
 
         while (this.isRunning) {
             int ready = this.selector.select(1000);
+
+            // Always check for idle/hanging clients on every loop tick
+            checkTimeouts();
+
             if (ready == 0) {
                 continue;
             }
@@ -65,6 +74,26 @@ public class Server {
                     closeClient(key);
                 }
             }
+        }
+    }
+
+    // Check all registered clients and disconnect any that exceeded TIMEOUT_MS
+    private void checkTimeouts() {
+        long now = System.currentTimeMillis();
+        List<SelectionKey> timedOut = new ArrayList<>();
+
+        for (SelectionKey key : this.selector.keys()) {
+            if (key.isValid() && key.channel() instanceof SocketChannel) {
+                Client client = (Client) key.attachment();
+                if (client != null && (now - client.getLastActiveTime() > TIMEOUT_MS)) {
+                    timedOut.add(key);
+                }
+            }
+        }
+
+        for (SelectionKey key : timedOut) {
+            System.out.println("Client timed out due to inactivity, closing connection.");
+            closeClient(key);
         }
     }
 
@@ -178,8 +207,13 @@ public class Server {
             }
         }
 
-        // All response bytes written cleanly
-        closeClient(key);
+        // Check if connection should be kept alive for reuse
+        if (client.isKeepAlive()) {
+            client.resetForNextRequest();
+            key.interestOps(SelectionKey.OP_READ); // switch back to OP_READ for next request
+        } else {
+            closeClient(key);
+        }
     }
 
     private String getMimeType(String filename) {

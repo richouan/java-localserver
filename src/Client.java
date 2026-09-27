@@ -22,6 +22,7 @@ public class Client {
     private ByteBuffer readBuffer;
     private StringBuilder rawRequest;
     private long lastActiveTime;
+    private boolean keepAlive;
 
     // Parsed HTTP request data
     private String method;
@@ -43,6 +44,7 @@ public class Client {
         this.rawRequest = new StringBuilder();
         this.headers = new HashMap<>();
         this.lastActiveTime = System.currentTimeMillis();
+        this.keepAlive = false;
     }
 
     public SocketChannel getChannel() {
@@ -71,6 +73,10 @@ public class Client {
 
     public long getLastActiveTime() {
         return this.lastActiveTime;
+    }
+
+    public boolean isKeepAlive() {
+        return this.keepAlive;
     }
 
     public String getMethod() {
@@ -115,6 +121,21 @@ public class Client {
         }
     }
 
+    // Reset client state to wait for the next HTTP request on keep-alive
+    public void resetForNextRequest() {
+        closeFileChannel();
+        this.fileChannel = null;
+        this.fileBytesRemaining = 0;
+        this.responseBuffer = null;
+        this.method = null;
+        this.path = null;
+        this.version = null;
+        this.headers.clear();
+        this.rawRequest.setLength(0);
+        this.state = State.READING_HEADERS;
+        this.lastActiveTime = System.currentTimeMillis();
+    }
+
     // Prepare a response with a FileChannel
     public void prepareFileResponse(int statusCode, String statusText, Path filePath, String contentType) throws IOException {
         this.fileChannel = FileChannel.open(filePath, StandardOpenOption.READ);
@@ -125,7 +146,7 @@ public class Client {
         res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(fileSize).append("\r\n");
-        res.append("Connection: close\r\n");
+        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
         res.append("\r\n");
 
         byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
@@ -142,7 +163,7 @@ public class Client {
         res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
-        res.append("Connection: close\r\n");
+        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
         res.append("\r\n");
 
         byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
@@ -186,6 +207,17 @@ public class Client {
                 String value = line.substring(colonIndex + 1).trim();
                 this.headers.put(key, value);
             }
+        }
+
+        // Determine keep-alive (HTTP/1.1 defaults to keep-alive unless Connection: close)
+        String connHeader = this.headers.get("connection");
+        if ("close".equalsIgnoreCase(connHeader)) {
+            this.keepAlive = false;
+        } else if ("keep-alive".equalsIgnoreCase(connHeader)) {
+            this.keepAlive = true;
+        } else {
+            // Default in HTTP/1.1 is keep-alive
+            this.keepAlive = "HTTP/1.1".equalsIgnoreCase(this.version);
         }
 
         return true;
