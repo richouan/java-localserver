@@ -1,11 +1,15 @@
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Iterator;
 import java.util.Set;
 
@@ -101,40 +105,87 @@ public class Server {
         buffer.get(bytes);
         client.getRawRequest().append(new String(bytes, StandardCharsets.UTF_8));
 
-        // When headers are complete, prepare response and switch to OP_WRITE
+        // When headers are complete, resolve file and prepare response
         if (client.getState() == Client.State.READING_HEADERS) {
             if (client.parseHeaders()) {
                 System.out.println("Parsed request: " + client.getMethod() + " " + client.getPath() + " (" + client.getVersion() + ")");
-                
-                // Prepare a simple 200 OK test response
-                String html = "<html><body><h1>Hello from LocalServer!</h1><p>You requested: " 
-                              + client.getPath() + "</p></body></html>";
-                client.prepareResponse(200, "OK", html, "text/html");
 
-                // Switch registration to OP_WRITE so selector tells us when socket is ready for writing
+                // Serve static file from www directory
+                String requestedPath = client.getPath();
+                if (requestedPath.equals("/")) {
+                    requestedPath = "/index.html";
+                }
+
+                Path filePath = Paths.get("www", requestedPath).normalize();
+
+                // Prevent directory traversal attacks
+                if (!filePath.startsWith(Paths.get("www"))) {
+                    client.prepareResponse(403, "Forbidden", "<h1>403 Forbidden</h1>", "text/html");
+                } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
+                    String contentType = getMimeType(filePath.toString());
+                    client.prepareFileResponse(200, "OK", filePath, contentType);
+                } else {
+                    client.prepareResponse(404, "Not Found", "<h1>404 Not Found</h1>", "text/html");
+                }
+
                 key.interestOps(SelectionKey.OP_WRITE);
             }
         }
     }
 
-    // Write outgoing response (1 write per select)
+    // Write outgoing response in non-blocking chunks (1 write per select)
     private void handleWrite(SelectionKey key) throws IOException {
         Client client = (Client) key.attachment();
         SocketChannel channel = client.getChannel();
-        ByteBuffer buffer = client.getResponseBuffer();
+        ByteBuffer headerBuffer = client.getResponseBuffer();
 
-        if (buffer != null && buffer.hasRemaining()) {
-            channel.write(buffer);
+        // 1. Send HTTP header bytes first
+        if (headerBuffer != null && headerBuffer.hasRemaining()) {
+            channel.write(headerBuffer);
+            if (headerBuffer.hasRemaining()) {
+                return; // partial write, wait for next OP_WRITE
+            }
         }
 
-        // If all bytes written, close connection (HTTP Connection: close)
-        if (buffer == null || !buffer.hasRemaining()) {
-            closeClient(key);
+        // 2. Stream static file bytes using FileChannel directly into socket
+        FileChannel fileChannel = client.getFileChannel();
+        if (fileChannel != null && client.getFileBytesRemaining() > 0) {
+            ByteBuffer fileBuf = client.getReadBuffer(); // reuse 8KB buffer
+            fileBuf.clear();
+
+            int readFromFile = fileChannel.read(fileBuf);
+            if (readFromFile > 0) {
+                fileBuf.flip();
+                channel.write(fileBuf);
+                client.decrementFileBytes(readFromFile);
+            }
+
+            // If more file bytes remain, stay on OP_WRITE for next selector tick
+            if (client.getFileBytesRemaining() > 0) {
+                return;
+            }
         }
+
+        // All response bytes written
+        closeClient(key);
+    }
+
+    private String getMimeType(String filename) {
+        if (filename.endsWith(".html") || filename.endsWith(".htm")) return "text/html";
+        if (filename.endsWith(".css")) return "text/css";
+        if (filename.endsWith(".js")) return "application/javascript";
+        if (filename.endsWith(".png")) return "image/png";
+        if (filename.endsWith(".jpg") || filename.endsWith(".jpeg")) return "image/jpeg";
+        if (filename.endsWith(".txt")) return "text/plain";
+        return "application/octet-stream";
     }
 
     private void closeClient(SelectionKey key) {
         try {
+            Client client = (Client) key.attachment();
+            if (client != null) {
+                client.closeFileChannel();
+            }
             key.cancel();
             key.channel().close();
         } catch (IOException e) {
