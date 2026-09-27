@@ -1,3 +1,4 @@
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -197,7 +198,14 @@ public class Server {
 
                     if (!filePath.startsWith(rootPath)) {
                         sendError(client, serverBlock, 403, "Forbidden");
-                    } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
+                    } else if (Files.isDirectory(filePath)) {
+                        if (routeMatch.rule.listing) {
+                            String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
+                            client.prepareResponse(200, "OK", listingHtml, "text/html");
+                        } else {
+                            sendError(client, serverBlock, 403, "Forbidden");
+                        }
+                    } else if (Files.exists(filePath)) {
                         String contentType = getMimeType(filePath.toString());
                         client.prepareFileResponse(200, "OK", filePath, contentType);
                     } else {
@@ -208,6 +216,30 @@ public class Server {
                 key.interestOps(SelectionKey.OP_WRITE);
             }
         }
+    }
+
+    private String generateDirectoryListing(File dir, String uriPath) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<!DOCTYPE html><html><head><title>Index of ").append(uriPath).append("</title></head><body>");
+        sb.append("<h1>Index of ").append(uriPath).append("</h1><hr><ul>");
+
+        if (!uriPath.equals("/")) {
+            sb.append("<li><a href=\"..\">.. (Parent Directory)</a></li>");
+        }
+
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                String name = f.getName();
+                if (f.isDirectory()) {
+                    name += "/";
+                }
+                sb.append("<li><a href=\"").append(name).append("\">").append(name).append("</a></li>");
+            }
+        }
+
+        sb.append("</ul><hr></body></html>");
+        return sb.toString();
     }
 
     private void sendError(Client client, Config.ServerBlock serverBlock, int statusCode, String defaultReason) {
