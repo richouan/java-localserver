@@ -11,39 +11,64 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
 public class Server {
-    private int port;
+    private Config config;
     private boolean isRunning;
     private Selector selector;
-    private ServerSocketChannel serverChannel;
+    private List<ServerSocketChannel> serverChannels;
 
-    // Timeout duration in milliseconds (30 seconds)
     private static final long TIMEOUT_MS = 30000;
 
-    public Server(int port) {
-        this.port = port;
+    public Server(Config config) {
+        this.config = config;
         this.isRunning = false;
+        this.serverChannels = new ArrayList<>();
     }
 
     public void start() throws IOException {
         this.selector = Selector.open();
 
-        this.serverChannel = ServerSocketChannel.open();
-        this.serverChannel.configureBlocking(false);
-        this.serverChannel.bind(new InetSocketAddress(this.port));
-        this.serverChannel.register(this.selector, SelectionKey.OP_ACCEPT);
+        // Track bound ports to detect duplicate port conflicts
+        Set<Integer> boundPorts = new HashSet<>();
+
+        // Bind a ServerSocketChannel for each unique port across all server blocks
+        for (Config.ServerBlock serverBlock : this.config.getServers()) {
+            if (boundPorts.contains(serverBlock.port)) {
+                // Same physical port shared by another virtual host (valid virtual host group)
+                continue;
+            }
+
+            try {
+                ServerSocketChannel ssc = ServerSocketChannel.open();
+                ssc.configureBlocking(false);
+                ssc.bind(new InetSocketAddress(serverBlock.host, serverBlock.port));
+
+                // Register each listening socket to the SAME selector
+                ssc.register(this.selector, SelectionKey.OP_ACCEPT);
+                this.serverChannels.add(ssc);
+                boundPorts.add(serverBlock.port);
+
+                System.out.println("Listening on " + serverBlock.host + ":" + serverBlock.port);
+            } catch (IOException e) {
+                System.err.println("Failed to bind port " + serverBlock.port + ": " + e.getMessage());
+                // An invalid server configuration must not destroy valid ones (audit rule)
+            }
+        }
+
+        if (this.serverChannels.isEmpty()) {
+            throw new IOException("No listening ports could be bound.");
+        }
 
         this.isRunning = true;
-        System.out.println("Server listening on port " + this.port);
 
         while (this.isRunning) {
             int ready = this.selector.select(1000);
 
-            // Always check for idle/hanging clients on every loop tick
             checkTimeouts();
 
             if (ready == 0) {
@@ -77,7 +102,38 @@ public class Server {
         }
     }
 
-    // Check all registered clients and disconnect any that exceeded TIMEOUT_MS
+    // Resolve matching virtual server block by port and Host header
+    private Config.ServerBlock resolveServerBlock(SocketChannel channel, String hostHeader) {
+        int localPort = 8080;
+        try {
+            InetSocketAddress localAddr = (InetSocketAddress) channel.getLocalAddress();
+            localPort = localAddr.getPort();
+        } catch (IOException e) {
+            // fallback
+        }
+
+        // Clean host header (strip :port if present)
+        String reqHost = hostHeader;
+        if (reqHost != null && reqHost.contains(":")) {
+            reqHost = reqHost.substring(0, reqHost.indexOf(":")).trim();
+        }
+
+        Config.ServerBlock defaultMatch = null;
+
+        for (Config.ServerBlock block : this.config.getServers()) {
+            if (block.port == localPort) {
+                if (defaultMatch == null) {
+                    defaultMatch = block;
+                }
+                if (reqHost != null && reqHost.equalsIgnoreCase(block.serverName)) {
+                    return block; // exact host match found!
+                }
+            }
+        }
+
+        return defaultMatch != null ? defaultMatch : this.config.getServers().get(0);
+    }
+
     private void checkTimeouts() {
         long now = System.currentTimeMillis();
         List<SelectionKey> timedOut = new ArrayList<>();
@@ -92,7 +148,6 @@ public class Server {
         }
 
         for (SelectionKey key : timedOut) {
-            System.out.println("Client timed out due to inactivity, closing connection.");
             closeClient(key);
         }
     }
@@ -105,11 +160,9 @@ public class Server {
             clientChannel.configureBlocking(false);
             Client client = new Client(clientChannel);
             clientChannel.register(this.selector, SelectionKey.OP_READ, client);
-            System.out.println("New client connected: " + clientChannel.getRemoteAddress());
         }
     }
 
-    // Read incoming request data (1 read per select)
     private void handleRead(SelectionKey key) throws IOException {
         Client client = (Client) key.attachment();
         SocketChannel channel = client.getChannel();
@@ -134,21 +187,20 @@ public class Server {
         buffer.get(bytes);
         client.getRawRequest().append(new String(bytes, StandardCharsets.UTF_8));
 
-        // When headers are complete, resolve file and prepare response
         if (client.getState() == Client.State.READING_HEADERS) {
             if (client.parseHeaders()) {
-                System.out.println("Parsed request: " + client.getMethod() + " " + client.getPath() + " (" + client.getVersion() + ")");
+                // Find matching ServerBlock based on port and Host header
+                String hostHeader = client.getHeaders().get("host");
+                Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-                // Serve static file from www directory
                 String requestedPath = client.getPath();
                 if (requestedPath.equals("/")) {
                     requestedPath = "/index.html";
                 }
 
-                Path filePath = Paths.get("www", requestedPath).normalize();
+                Path filePath = Paths.get(serverBlock.root, requestedPath).normalize();
 
-                // Prevent directory traversal attacks
-                if (!filePath.startsWith(Paths.get("www"))) {
+                if (!filePath.startsWith(Paths.get(serverBlock.root))) {
                     client.prepareResponse(403, "Forbidden", "<h1>403 Forbidden</h1>", "text/html");
                 } else if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
                     String contentType = getMimeType(filePath.toString());
@@ -162,36 +214,31 @@ public class Server {
         }
     }
 
-    // Write outgoing response in non-blocking chunks (1 write per select)
     private void handleWrite(SelectionKey key) throws IOException {
         Client client = (Client) key.attachment();
         SocketChannel channel = client.getChannel();
         ByteBuffer headerBuffer = client.getResponseBuffer();
 
-        // 1. Send HTTP header bytes first (handle partial write)
         if (headerBuffer != null && headerBuffer.hasRemaining()) {
             channel.write(headerBuffer);
             client.updateActivity();
             if (headerBuffer.hasRemaining()) {
-                return; // still has header bytes left, resume on next OP_WRITE
+                return;
             }
         }
 
-        // 2. Stream static file bytes using FileChannel directly into socket
         FileChannel fileChannel = client.getFileChannel();
         if (fileChannel != null && client.getFileBytesRemaining() > 0) {
             ByteBuffer fileBuf = client.getReadBuffer();
 
-            // If previous partial write still has unsent file bytes in buffer, flush them first
             if (fileBuf.hasRemaining()) {
                 channel.write(fileBuf);
                 client.updateActivity();
                 if (fileBuf.hasRemaining()) {
-                    return; // network socket buffer full, wait for next OP_WRITE
+                    return;
                 }
             }
 
-            // Read the next chunk from file
             fileBuf.clear();
             int readFromFile = fileChannel.read(fileBuf);
             if (readFromFile > 0) {
@@ -201,16 +248,14 @@ public class Server {
                 client.updateActivity();
             }
 
-            // If more file bytes remain or buffer still has remaining bytes, wait for next OP_WRITE
             if (client.getFileBytesRemaining() > 0 || fileBuf.hasRemaining()) {
                 return;
             }
         }
 
-        // Check if connection should be kept alive for reuse
         if (client.isKeepAlive()) {
             client.resetForNextRequest();
-            key.interestOps(SelectionKey.OP_READ); // switch back to OP_READ for next request
+            key.interestOps(SelectionKey.OP_READ);
         } else {
             closeClient(key);
         }
@@ -235,18 +280,20 @@ public class Server {
             key.cancel();
             key.channel().close();
         } catch (IOException e) {
-            // ignore cleanup errors
+            // ignore
         }
     }
 
     public void stop() {
         this.isRunning = false;
 
-        if (this.serverChannel != null && this.serverChannel.isOpen()) {
-            try {
-                this.serverChannel.close();
-            } catch (IOException e) {
-                System.err.println("Error closing server channel: " + e.getMessage());
+        for (ServerSocketChannel ssc : this.serverChannels) {
+            if (ssc != null && ssc.isOpen()) {
+                try {
+                    ssc.close();
+                } catch (IOException e) {
+                    // ignore
+                }
             }
         }
 
@@ -254,7 +301,7 @@ public class Server {
             try {
                 this.selector.close();
             } catch (IOException e) {
-                System.err.println("Error closing selector: " + e.getMessage());
+                // ignore
             }
         }
         System.out.println("Server stopped.");

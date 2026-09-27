@@ -20,7 +20,8 @@ public class Main {
                 System.out.println("No config found, using defaults.");
             }
 
-            Server server = new Server(config.getPort());
+            // Pass the whole Config object supporting multiple ports and virtual hosts
+            Server server = new Server(config);
             server.start();
         } catch (Exception e) {
             System.err.println("Fatal error starting server: " + e.getMessage());
