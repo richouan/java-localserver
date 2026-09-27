@@ -11,16 +11,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 public class Server {
     private Config config;
     private boolean isRunning;
     private Selector selector;
     private List<ServerSocketChannel> serverChannels;
+    private Map<String, Integer> sessions = new HashMap<>();
 
     private static final long TIMEOUT_MS = 30000;
 
@@ -211,6 +215,11 @@ public class Server {
     }
 
     private void processRequest(Client client, Config.ServerBlock serverBlock) throws IOException {
+        if ("/session".equals(client.getPath())) {
+            handleSession(client);
+            return;
+        }
+
         Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
 
         if (routeMatch.isRedirect) {
@@ -297,6 +306,36 @@ public class Server {
             client.prepareResponse(201, "Created", responseHtml, "text/html");
         } catch (IOException e) {
             sendError(client, serverBlock, 500, "Internal Server Error");
+        }
+    }
+
+    private String getCookieValue(Client client, String cookieName) {
+        String cookieHeader = client.getHeaders().get("cookie");
+        if (cookieHeader == null) return null;
+        for (String part : cookieHeader.split(";")) {
+            String[] kv = part.trim().split("=");
+            if (kv.length == 2 && kv[0].trim().equals(cookieName)) {
+                return kv[1].trim();
+            }
+        }
+        return null;
+    }
+
+    private void handleSession(Client client) {
+        String sid = getCookieValue(client, "session_id");
+        int visits = 1;
+
+        if (sid != null && this.sessions.containsKey(sid)) {
+            visits = this.sessions.get(sid) + 1;
+            this.sessions.put(sid, visits);
+            String html = "<html><body><h1>Session Active</h1><p>Session ID: " + sid + "</p><p>Visits: " + visits + "</p></body></html>";
+            client.prepareResponse(200, "OK", html, "text/html");
+        } else {
+            sid = UUID.randomUUID().toString().substring(0, 8);
+            this.sessions.put(sid, 1);
+            client.setResponseHeader("Set-Cookie", "session_id=" + sid + "; Path=/");
+            String html = "<html><body><h1>New Session Created</h1><p>Session ID: " + sid + "</p><p>Visits: 1</p></body></html>";
+            client.prepareResponse(200, "OK", html, "text/html");
         }
     }
 

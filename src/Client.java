@@ -26,6 +26,7 @@ public class Client {
     private long contentLength;
 
     private ByteBuffer responseBuffer;
+    private Map<String, String> responseHeaders = new HashMap<>();
     private FileChannel fileChannel;
     private long fileBytesRemaining;
 
@@ -185,11 +186,16 @@ public class Client {
         }
     }
 
+    public void setResponseHeader(String key, String value) {
+        this.responseHeaders.put(key, value);
+    }
+
     public void resetForNextRequest() {
         closeFileChannel();
         this.fileChannel = null;
         this.fileBytesRemaining = 0;
         this.responseBuffer = null;
+        this.responseHeaders.clear();
         this.method = null;
         this.path = null;
         this.version = null;
@@ -223,6 +229,9 @@ public class Client {
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(fileSize).append("\r\n");
         res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
+        for (Map.Entry<String, String> entry : this.responseHeaders.entrySet()) {
+            res.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+        }
         res.append("\r\n");
 
         byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
@@ -237,6 +246,9 @@ public class Client {
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
         res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
+        for (Map.Entry<String, String> entry : this.responseHeaders.entrySet()) {
+            res.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
+        }
         res.append("\r\n");
 
         byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
