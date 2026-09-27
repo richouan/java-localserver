@@ -52,10 +52,6 @@ public class Router {
             if (Files.exists(indexPath)) {
                 resolved = indexPath;
             }
-        } else if (requestPath.equals("/") || requestPath.equals(bestRule.path)) {
-            if (Files.isDirectory(resolved) && bestRule.index != null) {
-                resolved = resolved.resolve(bestRule.index);
-            }
         }
 
         match.targetPath = resolved;
