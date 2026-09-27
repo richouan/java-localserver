@@ -264,6 +264,20 @@ public class Server {
             return;
         }
 
+        if ("DELETE".equalsIgnoreCase(client.getMethod())) {
+            if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
+                try {
+                    Files.delete(filePath);
+                    client.prepareResponse(204, "No Content", "", "text/plain");
+                } catch (IOException e) {
+                    sendError(client, serverBlock, 500, "Internal Server Error");
+                }
+            } else {
+                sendError(client, serverBlock, 404, "Not Found");
+            }
+            return;
+        }
+
         if (Files.isDirectory(filePath)) {
             if (routeMatch.rule.listing) {
                 String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
