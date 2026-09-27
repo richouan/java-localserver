@@ -193,7 +193,7 @@ public class Server {
             hostHeader = client.getHeaders().get("host");
             serverBlock = resolveServerBlock(channel, hostHeader);
 
-            if (client.getContentLength() > serverBlock.bodyLimit) {
+            if (!client.isChunked() && client.getContentLength() > serverBlock.bodyLimit) {
                 sendError(client, serverBlock, 413, "Payload Too Large");
                 key.interestOps(SelectionKey.OP_WRITE);
                 return;

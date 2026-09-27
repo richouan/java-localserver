@@ -24,6 +24,7 @@ public class Client {
     private String version;
     private Map<String, String> headers;
     private long contentLength;
+    private boolean isChunked;
 
     private ByteBuffer responseBuffer;
     private Map<String, String> responseHeaders = new HashMap<>();
@@ -40,6 +41,11 @@ public class Client {
         this.headersParsed = false;
         this.headerEnd = -1;
         this.contentLength = 0;
+        this.isChunked = false;
+    }
+
+    public boolean isChunked() {
+        return this.isChunked;
     }
 
     public SocketChannel getChannel() {
@@ -154,12 +160,18 @@ public class Client {
             }
         }
 
+        String te = this.headers.get("transfer-encoding");
+        this.isChunked = te != null && te.toLowerCase().contains("chunked");
+
         this.headersParsed = true;
         return true;
     }
 
     public int getBodySize() {
         if (!this.headersParsed) return 0;
+        if (this.isChunked) {
+            return getBody().length;
+        }
         int size = this.rawBytes.size() - (this.headerEnd + 4);
         return Math.max(0, size);
     }
@@ -168,14 +180,38 @@ public class Client {
         if (!this.headersParsed) return new byte[0];
         byte[] all = this.rawBytes.toByteArray();
         int start = this.headerEnd + 4;
-        int end = (int) Math.min(all.length, start + this.contentLength);
         if (start >= all.length) return new byte[0];
+
+        if (this.isChunked) {
+            return decodeChunked(all, start);
+        }
+
+        int end = (int) Math.min(all.length, start + this.contentLength);
         return Arrays.copyOfRange(all, start, end);
     }
 
     public boolean isBodyComplete() {
         if (!this.headersParsed) return false;
+        if (this.isChunked) {
+            byte[] all = this.rawBytes.toByteArray();
+            String text = new String(all, this.headerEnd + 4, all.length - (this.headerEnd + 4), StandardCharsets.ISO_8859_1);
+            return text.endsWith("0\r\n\r\n") || text.contains("\r\n0\r\n\r\n");
+        }
         return getBodySize() >= this.contentLength;
+    }
+
+    private byte[] decodeChunked(byte[] data, int start) {
+        String text = new String(data, start, data.length - start, StandardCharsets.ISO_8859_1);
+        String[] parts = text.split("\r\n");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        for (int i = 0; i < parts.length - 1; i += 2) {
+            if ("0".equals(parts[i].trim())) break;
+            try {
+                out.write(parts[i + 1].getBytes(StandardCharsets.ISO_8859_1));
+            } catch (Exception ignored) {}
+        }
+        return out.toByteArray();
     }
 
     public void closeFileChannel() {
@@ -204,6 +240,7 @@ public class Client {
         this.headersParsed = false;
         this.headerEnd = -1;
         this.contentLength = 0;
+        this.isChunked = false;
         this.lastActiveTime = System.currentTimeMillis();
     }
 
