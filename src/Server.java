@@ -7,12 +7,12 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.StandardCharsets;
+// import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
+// import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -177,59 +177,33 @@ public class Server {
         client.updateActivity();
         buffer.flip();
 
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        client.appendBytes(bytes);
+
         String hostHeader = client.getHeaders().get("host");
         Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-        if (client.getState() == Client.State.READING_HEADERS) {
-            byte[] bytes = new byte[buffer.remaining()];
-            buffer.get(bytes);
-            client.getRawRequest().append(new String(bytes, StandardCharsets.ISO_8859_1));
-
-            if (client.parseHeaders()) {
-                hostHeader = client.getHeaders().get("host");
-                serverBlock = resolveServerBlock(channel, hostHeader);
-
-                if (client.getContentLength() > serverBlock.bodyLimit) {
-                    sendError(client, serverBlock, 413, "Payload Too Large");
-                    key.interestOps(SelectionKey.OP_WRITE);
-                    return;
-                }
-
-                if ("POST".equalsIgnoreCase(client.getMethod()) && client.getContentLength() > 0) {
-                    String content = client.getRawRequest().toString();
-                    int headerEnd = content.indexOf("\r\n\r\n");
-                    String leftover = content.substring(headerEnd + 4);
-
-                    if (!leftover.isEmpty()) {
-                        byte[] leftoverBytes = leftover.getBytes(StandardCharsets.ISO_8859_1);
-                        int toWrite = (int) Math.min(leftoverBytes.length, client.getContentLength());
-                        client.appendBody(leftoverBytes, 0, toWrite);
-                    }
-
-                    if (client.isBodyComplete()) {
-                        processRequest(client, serverBlock);
-                        key.interestOps(SelectionKey.OP_WRITE);
-                    } else {
-                        client.setState(Client.State.READING_BODY);
-                    }
-                } else {
-                    processRequest(client, serverBlock);
-                    key.interestOps(SelectionKey.OP_WRITE);
-                }
+        if (!client.areHeadersParsed()) {
+            if (!client.parseHeaders()) {
+                return;
             }
-        } else if (client.getState() == Client.State.READING_BODY) {
-            byte[] bytes = new byte[buffer.remaining()];
-            buffer.get(bytes);
+            hostHeader = client.getHeaders().get("host");
+            serverBlock = resolveServerBlock(channel, hostHeader);
 
-            if (client.getBodySize() + bytes.length > serverBlock.bodyLimit) {
+            if (client.getContentLength() > serverBlock.bodyLimit) {
                 sendError(client, serverBlock, 413, "Payload Too Large");
                 key.interestOps(SelectionKey.OP_WRITE);
                 return;
             }
+        }
 
-            int remainingNeeded = (int) (client.getContentLength() - client.getBodySize());
-            int toWrite = Math.min(bytes.length, remainingNeeded);
-            client.appendBody(bytes, 0, toWrite);
+        if (client.areHeadersParsed()) {
+            if (client.getBodySize() > serverBlock.bodyLimit) {
+                sendError(client, serverBlock, 413, "Payload Too Large");
+                key.interestOps(SelectionKey.OP_WRITE);
+                return;
+            }
 
             if (client.isBodyComplete()) {
                 processRequest(client, serverBlock);
@@ -309,44 +283,10 @@ public class Server {
                 Files.createDirectories(uploadDir);
             }
 
-            String contentType = client.getHeaders().getOrDefault("content-type", "");
-            byte[] body = client.getBody();
-            String fileName = null;
-            byte[] fileData = null;
-
-            if (contentType.toLowerCase().startsWith("multipart/form-data")) {
-                String bodyStr = new String(body, StandardCharsets.ISO_8859_1);
-                int fnIndex = bodyStr.indexOf("filename=\"");
-                if (fnIndex != -1) {
-                    int fnEnd = bodyStr.indexOf("\"", fnIndex + 10);
-                    if (fnEnd != -1) {
-                        fileName = Paths.get(bodyStr.substring(fnIndex + 10, fnEnd)).getFileName().toString();
-                    }
-                }
-                int headerEnd = bodyStr.indexOf("\r\n\r\n");
-                if (headerEnd != -1) {
-                    int contentStart = headerEnd + 4;
-                    int contentEnd = bodyStr.lastIndexOf("\r\n--");
-                    if (contentEnd > contentStart) {
-                        fileData = Arrays.copyOfRange(body, contentStart, contentEnd);
-                    } else {
-                        fileData = Arrays.copyOfRange(body, contentStart, body.length);
-                    }
-                }
-            }
-
-            if (fileData == null) {
-                fileData = body;
-            }
-
-            if (fileName == null || fileName.isEmpty()) {
-                Path target = routeMatch.targetPath;
-                if (target != null && !Files.isDirectory(target) && target.getFileName() != null && !target.equals(uploadDir)) {
-                    fileName = target.getFileName().toString();
-                } else {
-                    fileName = "upload_" + System.currentTimeMillis() + ".dat";
-                }
-            }
+            Path target = routeMatch.targetPath;
+            String fileName = (target != null && !Files.isDirectory(target) && !target.equals(uploadDir))
+                    ? target.getFileName().toString()
+                    : "upload_" + System.currentTimeMillis() + ".dat";
 
             Path destFile = uploadDir.resolve(fileName).normalize();
             if (!destFile.startsWith(uploadDir)) {
@@ -354,9 +294,8 @@ public class Server {
                 return;
             }
 
-            Files.write(destFile, fileData);
-
-            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded successfully: " + fileName + "</p></body></html>";
+            Files.write(destFile, client.getBody());
+            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded: " + fileName + "</p></body></html>";
             client.prepareResponse(201, "Created", responseHtml, "text/html");
         } catch (IOException e) {
             sendError(client, serverBlock, 500, "Internal Server Error");

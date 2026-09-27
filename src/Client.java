@@ -6,45 +6,38 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
 public class Client {
-    public enum State {
-        READING_HEADERS,
-        READING_BODY,
-        WRITING_RESPONSE
-    }
-
     private SocketChannel channel;
-    private State state;
     private ByteBuffer readBuffer;
-    private StringBuilder rawRequest;
+    private ByteArrayOutputStream rawBytes;
     private long lastActiveTime;
     private boolean keepAlive;
 
+    private boolean headersParsed;
+    private int headerEnd;
     private String method;
     private String path;
     private String version;
     private Map<String, String> headers;
+    private long contentLength;
 
     private ByteBuffer responseBuffer;
-
     private FileChannel fileChannel;
     private long fileBytesRemaining;
 
-    private ByteArrayOutputStream requestBody;
-    private long contentLength;
-
     public Client(SocketChannel channel) {
         this.channel = channel;
-        this.state = State.READING_HEADERS;
         this.readBuffer = ByteBuffer.allocate(8192);
-        this.rawRequest = new StringBuilder();
+        this.rawBytes = new ByteArrayOutputStream();
         this.headers = new HashMap<>();
-        this.requestBody = new ByteArrayOutputStream();
         this.lastActiveTime = System.currentTimeMillis();
         this.keepAlive = false;
+        this.headersParsed = false;
+        this.headerEnd = -1;
         this.contentLength = 0;
     }
 
@@ -52,20 +45,8 @@ public class Client {
         return this.channel;
     }
 
-    public State getState() {
-        return this.state;
-    }
-
-    public void setState(State state) {
-        this.state = state;
-    }
-
     public ByteBuffer getReadBuffer() {
         return this.readBuffer;
-    }
-
-    public StringBuilder getRawRequest() {
-        return this.rawRequest;
     }
 
     public void updateActivity() {
@@ -116,114 +97,30 @@ public class Client {
         return this.contentLength;
     }
 
-    public void appendBody(byte[] data, int offset, int length) {
-        this.requestBody.write(data, offset, length);
+    public void appendBytes(byte[] data) {
+        this.rawBytes.write(data, 0, data.length);
     }
 
-    public int getBodySize() {
-        return this.requestBody.size();
-    }
-
-    public byte[] getBody() {
-        return this.requestBody.toByteArray();
-    }
-
-    public boolean isBodyComplete() {
-        return this.requestBody.size() >= this.contentLength;
-    }
-
-    public void closeFileChannel() {
-        if (this.fileChannel != null && this.fileChannel.isOpen()) {
-            try {
-                this.fileChannel.close();
-            } catch (IOException ignored) {}
-        }
-    }
-
-    public void resetForNextRequest() {
-        closeFileChannel();
-        this.fileChannel = null;
-        this.fileBytesRemaining = 0;
-        this.responseBuffer = null;
-        this.method = null;
-        this.path = null;
-        this.version = null;
-        this.headers.clear();
-        this.rawRequest.setLength(0);
-        this.requestBody.reset();
-        this.contentLength = 0;
-        this.state = State.READING_HEADERS;
-        this.lastActiveTime = System.currentTimeMillis();
-    }
-
-    public void prepareRedirect(String location) {
-        StringBuilder res = new StringBuilder();
-        res.append("HTTP/1.1 301 Moved Permanently\r\n");
-        res.append("Location: ").append(location).append("\r\n");
-        res.append("Content-Length: 0\r\n");
-        res.append("Connection: close\r\n");
-        res.append("\r\n");
-
-        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
-        this.responseBuffer = ByteBuffer.wrap(headerBytes);
-        this.state = State.WRITING_RESPONSE;
-    }
-
-    public void prepareFileResponse(int statusCode, String statusText, Path filePath, String contentType) throws IOException {
-        this.fileChannel = FileChannel.open(filePath, StandardOpenOption.READ);
-        long fileSize = this.fileChannel.size();
-        this.fileBytesRemaining = fileSize;
-
-        StringBuilder res = new StringBuilder();
-        res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
-        res.append("Content-Type: ").append(contentType).append("\r\n");
-        res.append("Content-Length: ").append(fileSize).append("\r\n");
-        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
-        res.append("\r\n");
-
-        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
-        this.responseBuffer = ByteBuffer.wrap(headerBytes);
-        this.state = State.WRITING_RESPONSE;
-    }
-
-    public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
-        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
-
-        StringBuilder res = new StringBuilder();
-        res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
-        res.append("Content-Type: ").append(contentType).append("\r\n");
-        res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
-        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
-        res.append("\r\n");
-
-        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
-
-        this.responseBuffer = ByteBuffer.allocate(headerBytes.length + bodyBytes.length);
-        this.responseBuffer.put(headerBytes);
-        this.responseBuffer.put(bodyBytes);
-        this.responseBuffer.flip();
-
-        this.state = State.WRITING_RESPONSE;
+    public boolean areHeadersParsed() {
+        return this.headersParsed;
     }
 
     public boolean parseHeaders() {
-        String content = this.rawRequest.toString();
-        int headerEnd = content.indexOf("\r\n\r\n");
-        if (headerEnd == -1) {
+        byte[] bytes = this.rawBytes.toByteArray();
+        String content = new String(bytes, StandardCharsets.ISO_8859_1);
+        int idx = content.indexOf("\r\n\r\n");
+        if (idx == -1) {
             return false;
         }
 
-        String headerSection = content.substring(0, headerEnd);
+        this.headerEnd = idx;
+        String headerSection = content.substring(0, idx);
         String[] lines = headerSection.split("\r\n");
-
-        if (lines.length == 0) {
-            return false;
-        }
+        if (lines.length == 0) return false;
 
         String[] requestLine = lines[0].split(" ");
-        if (requestLine.length < 3) {
-            return false;
-        }
+        if (requestLine.length < 3) return false;
+
         this.method = requestLine[0].trim();
         this.path = requestLine[1].trim();
         this.version = requestLine[2].trim();
@@ -256,6 +153,97 @@ public class Client {
             }
         }
 
+        this.headersParsed = true;
         return true;
+    }
+
+    public int getBodySize() {
+        if (!this.headersParsed) return 0;
+        int size = this.rawBytes.size() - (this.headerEnd + 4);
+        return Math.max(0, size);
+    }
+
+    public byte[] getBody() {
+        if (!this.headersParsed) return new byte[0];
+        byte[] all = this.rawBytes.toByteArray();
+        int start = this.headerEnd + 4;
+        int end = (int) Math.min(all.length, start + this.contentLength);
+        if (start >= all.length) return new byte[0];
+        return Arrays.copyOfRange(all, start, end);
+    }
+
+    public boolean isBodyComplete() {
+        if (!this.headersParsed) return false;
+        return getBodySize() >= this.contentLength;
+    }
+
+    public void closeFileChannel() {
+        if (this.fileChannel != null && this.fileChannel.isOpen()) {
+            try {
+                this.fileChannel.close();
+            } catch (IOException ignored) {}
+        }
+    }
+
+    public void resetForNextRequest() {
+        closeFileChannel();
+        this.fileChannel = null;
+        this.fileBytesRemaining = 0;
+        this.responseBuffer = null;
+        this.method = null;
+        this.path = null;
+        this.version = null;
+        this.headers.clear();
+        this.rawBytes.reset();
+        this.headersParsed = false;
+        this.headerEnd = -1;
+        this.contentLength = 0;
+        this.lastActiveTime = System.currentTimeMillis();
+    }
+
+    public void prepareRedirect(String location) {
+        StringBuilder res = new StringBuilder();
+        res.append("HTTP/1.1 301 Moved Permanently\r\n");
+        res.append("Location: ").append(location).append("\r\n");
+        res.append("Content-Length: 0\r\n");
+        res.append("Connection: close\r\n");
+        res.append("\r\n");
+
+        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
+        this.responseBuffer = ByteBuffer.wrap(headerBytes);
+    }
+
+    public void prepareFileResponse(int statusCode, String statusText, Path filePath, String contentType) throws IOException {
+        this.fileChannel = FileChannel.open(filePath, StandardOpenOption.READ);
+        long fileSize = this.fileChannel.size();
+        this.fileBytesRemaining = fileSize;
+
+        StringBuilder res = new StringBuilder();
+        res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
+        res.append("Content-Type: ").append(contentType).append("\r\n");
+        res.append("Content-Length: ").append(fileSize).append("\r\n");
+        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
+        res.append("\r\n");
+
+        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
+        this.responseBuffer = ByteBuffer.wrap(headerBytes);
+    }
+
+    public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+
+        StringBuilder res = new StringBuilder();
+        res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
+        res.append("Content-Type: ").append(contentType).append("\r\n");
+        res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
+        res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
+        res.append("\r\n");
+
+        byte[] headerBytes = res.toString().getBytes(StandardCharsets.UTF_8);
+
+        this.responseBuffer = ByteBuffer.allocate(headerBytes.length + bodyBytes.length);
+        this.responseBuffer.put(headerBytes);
+        this.responseBuffer.put(bodyBytes);
+        this.responseBuffer.flip();
     }
 }
