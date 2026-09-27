@@ -1,10 +1,11 @@
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-// import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.HashMap;
 import java.util.Map;
@@ -24,18 +25,20 @@ public class Client {
     private long lastActiveTime;
     private boolean keepAlive;
 
-    // Parsed HTTP request data
     private String method;
     private String path;
     private String version;
     private Map<String, String> headers;
 
-    // Outgoing response buffer (for headers or small responses)
     private ByteBuffer responseBuffer;
 
-    // FileChannel for streaming static files from disk
     private FileChannel fileChannel;
     private long fileBytesRemaining;
+
+    private File tempBodyFile;
+    private FileOutputStream tempBodyOut;
+    private long contentLength;
+    private long bodyBytesRead;
 
     public Client(SocketChannel channel) {
         this.channel = channel;
@@ -45,6 +48,8 @@ public class Client {
         this.headers = new HashMap<>();
         this.lastActiveTime = System.currentTimeMillis();
         this.keepAlive = false;
+        this.contentLength = 0;
+        this.bodyBytesRead = 0;
     }
 
     public SocketChannel getChannel() {
@@ -111,18 +116,59 @@ public class Client {
         this.fileBytesRemaining -= count;
     }
 
+    public File getTempBodyFile() {
+        return this.tempBodyFile;
+    }
+
+    public long getContentLength() {
+        return this.contentLength;
+    }
+
+    public long getBodyBytesRead() {
+        return this.bodyBytesRead;
+    }
+
+    public void appendBodyBytes(byte[] data, int offset, int length) throws IOException {
+        if (this.tempBodyOut == null) {
+            this.tempBodyFile = File.createTempFile("localserver_body_", ".tmp");
+            this.tempBodyOut = new FileOutputStream(this.tempBodyFile);
+        }
+        this.tempBodyOut.write(data, offset, length);
+        this.bodyBytesRead += length;
+    }
+
+    public boolean isBodyComplete() {
+        return this.bodyBytesRead >= this.contentLength;
+    }
+
+    public void closeBodyStream() {
+        if (this.tempBodyOut != null) {
+            try {
+                this.tempBodyOut.close();
+            } catch (IOException ignored) {}
+            this.tempBodyOut = null;
+        }
+    }
+
+    public void deleteTempBody() {
+        closeBodyStream();
+        if (this.tempBodyFile != null && this.tempBodyFile.exists()) {
+            this.tempBodyFile.delete();
+            this.tempBodyFile = null;
+        }
+    }
+
     public void closeFileChannel() {
         if (this.fileChannel != null && this.fileChannel.isOpen()) {
             try {
                 this.fileChannel.close();
-            } catch (IOException e) {
-                // ignore
-            }
+            } catch (IOException ignored) {}
         }
     }
 
     public void resetForNextRequest() {
         closeFileChannel();
+        deleteTempBody();
         this.fileChannel = null;
         this.fileBytesRemaining = 0;
         this.responseBuffer = null;
@@ -131,11 +177,12 @@ public class Client {
         this.version = null;
         this.headers.clear();
         this.rawRequest.setLength(0);
+        this.contentLength = 0;
+        this.bodyBytesRead = 0;
         this.state = State.READING_HEADERS;
         this.lastActiveTime = System.currentTimeMillis();
     }
 
-    // Prepare a 301 Redirect response
     public void prepareRedirect(String location) {
         StringBuilder res = new StringBuilder();
         res.append("HTTP/1.1 301 Moved Permanently\r\n");
@@ -149,7 +196,6 @@ public class Client {
         this.state = State.WRITING_RESPONSE;
     }
 
-    // Prepare a response with a FileChannel
     public void prepareFileResponse(int statusCode, String statusText, Path filePath, String contentType) throws IOException {
         this.fileChannel = FileChannel.open(filePath, StandardOpenOption.READ);
         long fileSize = this.fileChannel.size();
@@ -168,7 +214,6 @@ public class Client {
         this.state = State.WRITING_RESPONSE;
     }
 
-    // Prepare a simple memory string response
     public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
         byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
 
@@ -189,7 +234,6 @@ public class Client {
         this.state = State.WRITING_RESPONSE;
     }
 
-    // Parse HTTP headers once \r\n\r\n is found
     public boolean parseHeaders() {
         String content = this.rawRequest.toString();
         int headerEnd = content.indexOf("\r\n\r\n");
@@ -229,6 +273,15 @@ public class Client {
             this.keepAlive = true;
         } else {
             this.keepAlive = "HTTP/1.1".equalsIgnoreCase(this.version);
+        }
+
+        String cl = this.headers.get("content-length");
+        if (cl != null) {
+            try {
+                this.contentLength = Long.parseLong(cl.trim());
+            } catch (NumberFormatException e) {
+                this.contentLength = 0;
+            }
         }
 
         return true;

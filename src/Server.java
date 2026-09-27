@@ -104,7 +104,6 @@ public class Server {
             InetSocketAddress localAddr = (InetSocketAddress) channel.getLocalAddress();
             localPort = localAddr.getPort();
         } catch (IOException e) {
-            // fallback
         }
 
         String reqHost = hostHeader;
@@ -162,60 +161,113 @@ public class Server {
         SocketChannel channel = client.getChannel();
         ByteBuffer buffer = client.getReadBuffer();
 
-        buffer.clear();
-        int bytesRead = channel.read(buffer);
-
-        if (bytesRead == -1) {
-            closeClient(key);
-            return;
-        }
-
-        if (bytesRead == 0) {
-            return;
-        }
-
-        client.updateActivity();
-
-        buffer.flip();
-        byte[] bytes = new byte[buffer.remaining()];
-        buffer.get(bytes);
-        client.getRawRequest().append(new String(bytes, StandardCharsets.UTF_8));
-
         if (client.getState() == Client.State.READING_HEADERS) {
+            buffer.clear();
+            int bytesRead = channel.read(buffer);
+
+            if (bytesRead == -1) {
+                closeClient(key);
+                return;
+            }
+
+            if (bytesRead == 0) {
+                return;
+            }
+
+            client.updateActivity();
+
+            buffer.flip();
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            client.getRawRequest().append(new String(bytes, StandardCharsets.ISO_8859_1));
+
             if (client.parseHeaders()) {
-                String hostHeader = client.getHeaders().get("host");
-                Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
-
-                Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
-
-                if (routeMatch.isRedirect) {
-                    client.prepareRedirect(routeMatch.rule.redirect);
-                } else if (!routeMatch.isMethodAllowed) {
-                    sendError(client, serverBlock, 405, "Method Not Allowed");
-                } else {
-                    Path filePath = routeMatch.targetPath;
-                    Path rootPath = Paths.get(routeMatch.rule.root).normalize();
-
-                    if (!filePath.startsWith(rootPath)) {
-                        sendError(client, serverBlock, 403, "Forbidden");
-                    } else if (Files.isDirectory(filePath)) {
-                        if (routeMatch.rule.listing) {
-                            String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
-                            client.prepareResponse(200, "OK", listingHtml, "text/html");
-                        } else {
-                            sendError(client, serverBlock, 403, "Forbidden");
-                        }
-                    } else if (Files.exists(filePath)) {
-                        String contentType = getMimeType(filePath.toString());
-                        client.prepareFileResponse(200, "OK", filePath, contentType);
-                    } else {
-                        sendError(client, serverBlock, 404, "Not Found");
+                if ("POST".equalsIgnoreCase(client.getMethod()) && client.getContentLength() > 0) {
+                    String content = client.getRawRequest().toString();
+                    int headerEnd = content.indexOf("\r\n\r\n");
+                    String leftover = content.substring(headerEnd + 4);
+                    if (!leftover.isEmpty()) {
+                        byte[] leftoverBytes = leftover.getBytes(StandardCharsets.ISO_8859_1);
+                        int toWrite = (int) Math.min(leftoverBytes.length, client.getContentLength());
+                        client.appendBodyBytes(leftoverBytes, 0, toWrite);
                     }
-                }
 
-                key.interestOps(SelectionKey.OP_WRITE);
+                    if (client.isBodyComplete()) {
+                        client.closeBodyStream();
+                        processRequest(client, key);
+                    } else {
+                        client.setState(Client.State.READING_BODY);
+                    }
+                } else {
+                    processRequest(client, key);
+                }
+            }
+        } else if (client.getState() == Client.State.READING_BODY) {
+            buffer.clear();
+            int bytesRead = channel.read(buffer);
+
+            if (bytesRead == -1) {
+                closeClient(key);
+                return;
+            }
+
+            if (bytesRead == 0) {
+                return;
+            }
+
+            client.updateActivity();
+
+            buffer.flip();
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+
+            int remainingNeeded = (int) (client.getContentLength() - client.getBodyBytesRead());
+            int toWrite = Math.min(bytes.length, remainingNeeded);
+            client.appendBodyBytes(bytes, 0, toWrite);
+
+            if (client.isBodyComplete()) {
+                client.closeBodyStream();
+                processRequest(client, key);
             }
         }
+    }
+
+    private void processRequest(Client client, SelectionKey key) throws IOException {
+        SocketChannel channel = client.getChannel();
+        String hostHeader = client.getHeaders().get("host");
+        Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
+
+        Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
+
+        if (routeMatch.isRedirect) {
+            client.prepareRedirect(routeMatch.rule.redirect);
+        } else if (!routeMatch.isMethodAllowed) {
+            sendError(client, serverBlock, 405, "Method Not Allowed");
+        } else {
+            Path filePath = routeMatch.targetPath;
+            Path rootPath = Paths.get(routeMatch.rule.root).normalize();
+
+            if (!filePath.startsWith(rootPath)) {
+                sendError(client, serverBlock, 403, "Forbidden");
+            } else if ("POST".equalsIgnoreCase(client.getMethod())) {
+                String responseBody = "<html><body><h1>200 OK</h1><p>POST body received successfully (" + client.getBodyBytesRead() + " bytes).</p></body></html>";
+                client.prepareResponse(200, "OK", responseBody, "text/html");
+            } else if (Files.isDirectory(filePath)) {
+                if (routeMatch.rule.listing) {
+                    String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
+                    client.prepareResponse(200, "OK", listingHtml, "text/html");
+                } else {
+                    sendError(client, serverBlock, 403, "Forbidden");
+                }
+            } else if (Files.exists(filePath)) {
+                String contentType = getMimeType(filePath.toString());
+                client.prepareFileResponse(200, "OK", filePath, contentType);
+            } else {
+                sendError(client, serverBlock, 404, "Not Found");
+            }
+        }
+
+        key.interestOps(SelectionKey.OP_WRITE);
     }
 
     private String generateDirectoryListing(File dir, String uriPath) {
@@ -326,11 +378,11 @@ public class Server {
             Client client = (Client) key.attachment();
             if (client != null) {
                 client.closeFileChannel();
+                client.deleteTempBody();
             }
             key.cancel();
             key.channel().close();
         } catch (IOException e) {
-            // ignore
         }
     }
 
@@ -342,7 +394,6 @@ public class Server {
                 try {
                     ssc.close();
                 } catch (IOException e) {
-                    // ignore
                 }
             }
         }
@@ -351,7 +402,6 @@ public class Server {
             try {
                 this.selector.close();
             } catch (IOException e) {
-                // ignore
             }
         }
         System.out.println("Server stopped.");
