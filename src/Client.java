@@ -26,6 +26,7 @@ public class Client {
     private Map<String, String> headers;
     private long contentLength;
     private boolean isChunked;
+    private boolean isBadRequest;
 
     private ByteBuffer responseBuffer;
     private Map<String, String> responseHeaders = new HashMap<>();
@@ -43,6 +44,15 @@ public class Client {
         this.headerEnd = -1;
         this.contentLength = 0;
         this.isChunked = false;
+        this.isBadRequest = false;
+    }
+
+    public boolean isBadRequest() {
+        return this.isBadRequest;
+    }
+
+    public int getRawBytesSize() {
+        return this.rawBytes.size();
     }
 
     public boolean isChunked() {
@@ -128,10 +138,18 @@ public class Client {
         this.headerEnd = idx;
         String headerSection = content.substring(0, idx);
         String[] lines = headerSection.split("\r\n");
-        if (lines.length == 0) return false;
+        if (lines.length == 0) {
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
 
-        String[] requestLine = lines[0].split(" ");
-        if (requestLine.length < 3) return false;
+        String[] requestLine = lines[0].split("\\s+");
+        if (requestLine.length < 3) {
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
 
         this.method = requestLine[0].trim();
         String fullPath = requestLine[1].trim();
@@ -250,7 +268,15 @@ public class Client {
         this.queryString = "";
         this.version = null;
         this.headers.clear();
+        this.isBadRequest = false;
+
+        byte[] all = this.rawBytes.toByteArray();
+        int consumed = (this.headerEnd != -1) ? (this.headerEnd + 4 + (int)this.contentLength) : all.length;
         this.rawBytes.reset();
+        if (consumed < all.length) {
+            this.rawBytes.write(all, consumed, all.length - consumed);
+        }
+
         this.headersParsed = false;
         this.headerEnd = -1;
         this.contentLength = 0;

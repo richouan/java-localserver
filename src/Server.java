@@ -27,6 +27,8 @@ public class Server {
     private Selector selector;
     private List<ServerSocketChannel> serverChannels;
     private Map<String, Integer> sessions = new HashMap<>();
+    private long startTime;
+    private long requestCount = 0;
 
     private static final long TIMEOUT_MS = 30000;
 
@@ -34,6 +36,7 @@ public class Server {
         this.config = config;
         this.isRunning = false;
         this.serverChannels = new ArrayList<>();
+        this.startTime = System.currentTimeMillis();
     }
 
     public void start() throws IOException {
@@ -152,9 +155,8 @@ public class Server {
 
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
-        SocketChannel clientChannel = server.accept();
-
-        if (clientChannel != null) {
+        SocketChannel clientChannel;
+        while ((clientChannel = server.accept()) != null) {
             clientChannel.configureBlocking(false);
             Client client = new Client(clientChannel);
             clientChannel.register(this.selector, SelectionKey.OP_READ, client);
@@ -187,8 +189,18 @@ public class Server {
 
         if (!client.areHeadersParsed()) {
             if (!client.parseHeaders()) {
+                if (client.getRawBytesSize() > 16384) {
+                    sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+                    key.interestOps(SelectionKey.OP_WRITE);
+                }
                 return;
             }
+        }
+
+        if (client.isBadRequest()) {
+            sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
+            key.interestOps(SelectionKey.OP_WRITE);
+            return;
         }
 
         String hostHeader = client.getHeaders().get("host");
@@ -213,6 +225,13 @@ public class Server {
     }
 
     private void processRequest(Client client, Config.ServerBlock serverBlock) throws IOException {
+        this.requestCount++;
+
+        if ("/status".equals(client.getPath()) || "/metrics".equals(client.getPath())) {
+            handleStatus(client);
+            return;
+        }
+
         if ("/session".equals(client.getPath())) {
             handleSession(client);
             return;
@@ -462,6 +481,19 @@ public class Server {
             String html = "<html><body><h1>New Session Created</h1><p>Session ID: " + sid + "</p><p>Visits: 1</p></body></html>";
             client.prepareResponse(200, "OK", html, "text/html");
         }
+    }
+
+    private void handleStatus(Client client) {
+        long uptimeSec = (System.currentTimeMillis() - this.startTime) / 1000;
+        int activeClients = Math.max(0, this.selector.keys().size() - this.serverChannels.size());
+        String html = "<html><head><title>Server Status</title></head><body>"
+                + "<h1>Server Status & Metrics</h1>"
+                + "<p><strong>Uptime:</strong> " + uptimeSec + "s</p>"
+                + "<p><strong>Total Requests:</strong> " + this.requestCount + "</p>"
+                + "<p><strong>Active Connections:</strong> " + activeClients + "</p>"
+                + "<p><strong>Active Sessions:</strong> " + this.sessions.size() + "</p>"
+                + "</body></html>";
+        client.prepareResponse(200, "OK", html, "text/html");
     }
 
     private String generateDirectoryListing(File dir, String uriPath) {
