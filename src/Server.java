@@ -40,20 +40,23 @@ public class Server {
     }
 
     public void start() throws IOException {
+        // The selector is the core of multiplexing (it watches multiple ports at once)
         this.selector = Selector.open();
 
         Set<Integer> boundPorts = new HashSet<>();
 
+        // Loop through config and open a listening socket for each unique port
         for (Config.ServerBlock serverBlock : this.config.getServers()) {
             if (boundPorts.contains(serverBlock.port)) {
-                continue;
+                continue; // Skip if we already bound this port
             }
 
             try {
                 ServerSocketChannel ssc = ServerSocketChannel.open();
-                ssc.configureBlocking(false);
+                ssc.configureBlocking(false); // Make it non-blocking! Very important for the audit
                 ssc.bind(new InetSocketAddress(serverBlock.host, serverBlock.port));
 
+                // Tell the selector to wake us up when a new user tries to connect
                 ssc.register(this.selector, SelectionKey.OP_ACCEPT);
                 this.serverChannels.add(ssc);
                 boundPorts.add(serverBlock.port);
@@ -70,33 +73,38 @@ public class Server {
 
         this.isRunning = true;
 
+        // The main event loop
         while (this.isRunning) {
+            // Wait up to 1 second for any activity on the sockets
             int ready = this.selector.select(1000);
 
+            // Clean up clients that have been idle too long
             checkTimeouts();
 
             if (ready == 0) {
-                continue;
+                continue; // No activity, keep looping
             }
 
+            // Get the list of sockets that have activity
             Set<SelectionKey> keys = this.selector.selectedKeys();
             Iterator<SelectionKey> it = keys.iterator();
 
             while (it.hasNext()) {
                 SelectionKey key = it.next();
-                it.remove();
+                it.remove(); // Must remove it so we don't process it twice
 
                 if (!key.isValid()) {
                     continue;
                 }
 
                 try {
+                    // Check what kind of activity it is
                     if (key.isAcceptable()) {
-                        handleAccept(key);
+                        handleAccept(key); // New user connecting
                     } else if (key.isReadable()) {
-                        handleRead(key);
+                        handleRead(key); // User sent us data
                     } else if (key.isWritable()) {
-                        handleWrite(key);
+                        handleWrite(key); // We can send data back to user
                     }
                 } catch (IOException e) {
                     System.err.println("Error handling client: " + e.getMessage());
@@ -156,9 +164,15 @@ public class Server {
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel;
+        
+        // Accept the incoming connection
         while ((clientChannel = server.accept()) != null) {
-            clientChannel.configureBlocking(false);
+            clientChannel.configureBlocking(false); // Client must also be non-blocking
+            
+            // Create a Client object to keep track of this user's state
             Client client = new Client(clientChannel);
+            
+            // Tell the selector to let us know when this client sends data
             clientChannel.register(this.selector, SelectionKey.OP_READ, client);
         }
     }
@@ -171,6 +185,7 @@ public class Server {
         buffer.clear();
         int bytesRead = channel.read(buffer);
 
+        // If bytesRead is -1, the client disconnected
         if (bytesRead == -1) {
             closeClient(key);
             return;
@@ -180,23 +195,27 @@ public class Server {
             return;
         }
 
-        client.updateActivity();
+        client.updateActivity(); // Reset timeout timer
         buffer.flip();
 
+        // Save the raw bytes we just read
         byte[] bytes = new byte[buffer.remaining()];
         buffer.get(bytes);
         client.appendBytes(bytes);
 
+        // Try to parse headers if we haven't yet
         if (!client.areHeadersParsed()) {
             if (!client.parseHeaders()) {
+                // Protect against giant headers (malicious attacks)
                 if (client.getRawBytesSize() > 16384) {
                     sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
                     key.interestOps(SelectionKey.OP_WRITE);
                 }
-                return;
+                return; // Headers not fully received yet
             }
         }
 
+        // Check if the request is messed up
         if (client.isBadRequest()) {
             sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
             key.interestOps(SelectionKey.OP_WRITE);
@@ -206,6 +225,7 @@ public class Server {
         String hostHeader = client.getHeaders().get("host");
         Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
+        // Block files that are too big based on config
         if (!client.isChunked() && client.getContentLength() > serverBlock.bodyLimit) {
             sendError(client, serverBlock, 413, "Payload Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
@@ -218,15 +238,17 @@ public class Server {
             return;
         }
 
+        // Once we have the full request, figure out what to do with it
         if (client.isBodyComplete()) {
             processRequest(client, serverBlock);
-            key.interestOps(SelectionKey.OP_WRITE);
+            key.interestOps(SelectionKey.OP_WRITE); // Switch to write mode to send the answer
         }
     }
 
     private void processRequest(Client client, Config.ServerBlock serverBlock) throws IOException {
         this.requestCount++;
 
+        // Built-in endpoints
         if ("/status".equals(client.getPath()) || "/metrics".equals(client.getPath())) {
             handleStatus(client);
             return;
@@ -237,13 +259,16 @@ public class Server {
             return;
         }
 
+        // Match the request path to a route in our config
         Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
 
+        // Handle redirects (HTTP 301)
         if (routeMatch.isRedirect) {
             client.prepareRedirect(routeMatch.rule.redirect);
             return;
         }
 
+        // Check if the user is allowed to use this method (GET, POST, etc)
         if (!routeMatch.isMethodAllowed) {
             sendError(client, serverBlock, 405, "Method Not Allowed");
             return;
@@ -252,11 +277,13 @@ public class Server {
         Path filePath = routeMatch.targetPath;
         Path rootPath = Paths.get(routeMatch.rule.root).normalize();
 
+        // Security check: Don't let users access files outside the root folder
         if (!filePath.startsWith(rootPath)) {
             sendError(client, serverBlock, 403, "Forbidden");
             return;
         }
 
+        // If it's a script, run the CGI
         if (("GET".equalsIgnoreCase(client.getMethod()) || "POST".equalsIgnoreCase(client.getMethod())) && isCgi(filePath, routeMatch)) {
             if (!Files.exists(filePath) || Files.isDirectory(filePath)) {
                 sendError(client, serverBlock, 404, "Not Found");
@@ -266,6 +293,7 @@ public class Server {
             return;
         }
 
+        // Handle POST file uploads
         if ("POST".equalsIgnoreCase(client.getMethod())) {
             if (routeMatch.rule.uploadDir != null && !routeMatch.rule.uploadDir.isEmpty()) {
                 handleFileUpload(client, serverBlock, routeMatch);
@@ -277,6 +305,7 @@ public class Server {
             return;
         }
 
+        // Handle DELETE requests
         if ("DELETE".equalsIgnoreCase(client.getMethod())) {
             if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
                 try {
@@ -291,8 +320,10 @@ public class Server {
             return;
         }
 
+        // Handle folders
         if (Files.isDirectory(filePath)) {
             if (routeMatch.rule.listing) {
+                // Auto-generate a HTML page showing the folder's files
                 String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
                 client.prepareResponse(200, "OK", listingHtml, "text/html");
             } else {
@@ -301,6 +332,7 @@ public class Server {
             return;
         }
 
+        // Serve regular static files (html, css, images)
         if (Files.exists(filePath)) {
             String contentType = getMimeType(filePath.toString());
             client.prepareFileResponse(200, "OK", filePath, contentType);
@@ -371,6 +403,7 @@ public class Server {
                 pb.directory(scriptPath.getParent().toFile());
             }
 
+            // Set up environment variables that CGI scripts need to work properly
             Map<String, String> env = pb.environment();
             env.put("REQUEST_METHOD", client.getMethod());
             env.put("QUERY_STRING", client.getQueryString() != null ? client.getQueryString() : "");
@@ -384,21 +417,24 @@ public class Server {
             env.put("SERVER_NAME", serverBlock.serverName.isEmpty() ? serverBlock.host : serverBlock.serverName);
             env.put("SERVER_PORT", String.valueOf(serverBlock.port));
 
+            // Pass all HTTP headers to CGI as HTTP_X variables
             for (Map.Entry<String, String> h : client.getHeaders().entrySet()) {
                 env.put("HTTP_" + h.getKey().toUpperCase().replace("-", "_"), h.getValue());
             }
 
             Process p = pb.start();
 
+            // Send the request body to the CGI script if there is one
             if (client.getBodySize() > 0) {
                 p.getOutputStream().write(client.getBody());
                 p.getOutputStream().flush();
             }
             p.getOutputStream().close();
 
+            // Wait up to 5 seconds for the script to finish
             boolean finished = p.waitFor(5, TimeUnit.SECONDS);
             if (!finished) {
-                p.destroyForcibly();
+                p.destroyForcibly(); // Kill it if it hangs
                 sendError(client, serverBlock, 504, "Gateway Timeout");
                 return;
             }
@@ -408,9 +444,11 @@ public class Server {
                 return;
             }
 
+            // Read what the CGI script printed
             byte[] output = p.getInputStream().readAllBytes();
             String outStr = new String(output, StandardCharsets.UTF_8).replace("\r\r\n", "\r\n");
 
+            // Split the CGI output into Headers and Body
             int headerEnd = outStr.indexOf("\r\n\r\n");
             int delimLen = 4;
             if (headerEnd == -1) {
@@ -427,6 +465,7 @@ public class Server {
                 String headerPart = outStr.substring(0, headerEnd);
                 bodyPart = outStr.substring(headerEnd + delimLen);
 
+                // Parse the headers returned by the CGI
                 for (String line : headerPart.split("\r?\n")) {
                     int colon = line.indexOf(":");
                     if (colon != -1) {
@@ -547,18 +586,21 @@ public class Server {
         SocketChannel channel = client.getChannel();
         ByteBuffer headerBuffer = client.getResponseBuffer();
 
+        // First, send the HTTP headers (e.g., HTTP/1.1 200 OK)
         if (headerBuffer != null && headerBuffer.hasRemaining()) {
             channel.write(headerBuffer);
             client.updateActivity();
             if (headerBuffer.hasRemaining()) {
-                return;
+                return; // Still more headers to send, come back later
             }
         }
 
+        // Then, send the actual file or body if there is one
         FileChannel fileChannel = client.getFileChannel();
         if (fileChannel != null && client.getFileBytesRemaining() > 0) {
             ByteBuffer fileBuf = client.getReadBuffer();
 
+            // Flush anything left in our temporary buffer
             if (fileBuf.hasRemaining()) {
                 channel.write(fileBuf);
                 client.updateActivity();
@@ -567,6 +609,7 @@ public class Server {
                 }
             }
 
+            // Read a chunk from the file and send it
             fileBuf.clear();
             int readFromFile = fileChannel.read(fileBuf);
             if (readFromFile > 0) {
@@ -577,13 +620,14 @@ public class Server {
             }
 
             if (client.getFileBytesRemaining() > 0 || fileBuf.hasRemaining()) {
-                return;
+                return; // File isn't finished yet, come back later
             }
         }
 
+        // If we finished sending everything, check if we should keep connection open
         if (client.isKeepAlive()) {
             client.resetForNextRequest();
-            key.interestOps(SelectionKey.OP_READ);
+            key.interestOps(SelectionKey.OP_READ); // Switch back to read mode
         } else {
             closeClient(key);
         }

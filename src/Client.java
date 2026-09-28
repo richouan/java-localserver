@@ -130,9 +130,11 @@ public class Client {
     public boolean parseHeaders() {
         byte[] bytes = this.rawBytes.toByteArray();
         String content = new String(bytes, StandardCharsets.ISO_8859_1);
+        
+        // Find the empty line that separates headers from the body
         int idx = content.indexOf("\r\n\r\n");
         if (idx == -1) {
-            return false;
+            return false; // Still waiting for more data from client
         }
 
         this.headerEnd = idx;
@@ -144,6 +146,7 @@ public class Client {
             return true;
         }
 
+        // Parse the first line (e.g., "GET /index.html HTTP/1.1")
         String[] requestLine = lines[0].split("\\s+");
         if (requestLine.length < 3) {
             this.isBadRequest = true;
@@ -153,6 +156,8 @@ public class Client {
 
         this.method = requestLine[0].trim();
         String fullPath = requestLine[1].trim();
+        
+        // Separate path from query string (e.g., /search?q=hello)
         int qIdx = fullPath.indexOf("?");
         if (qIdx != -1) {
             this.path = fullPath.substring(0, qIdx);
@@ -163,6 +168,7 @@ public class Client {
         }
         this.version = requestLine[2].trim();
 
+        // Loop through the rest of the lines and store them as Key-Value pairs
         for (int i = 1; i < lines.length; i++) {
             String line = lines[i];
             int colonIndex = line.indexOf(":");
@@ -173,15 +179,17 @@ public class Client {
             }
         }
 
+        // Check if we should keep the connection alive
         String connHeader = this.headers.get("connection");
         if ("close".equalsIgnoreCase(connHeader)) {
             this.keepAlive = false;
         } else if ("keep-alive".equalsIgnoreCase(connHeader)) {
             this.keepAlive = true;
         } else {
-            this.keepAlive = "HTTP/1.1".equalsIgnoreCase(this.version);
+            this.keepAlive = "HTTP/1.1".equalsIgnoreCase(this.version); // Default for HTTP/1.1 is keep-alive
         }
 
+        // Check if there's a body attached (like in POST requests)
         String cl = this.headers.get("content-length");
         if (cl != null) {
             try {
@@ -232,13 +240,16 @@ public class Client {
     }
 
     private byte[] decodeChunked(byte[] data, int start) {
+        // Convert to string to easily split chunks
         String text = new String(data, start, data.length - start, StandardCharsets.ISO_8859_1);
-        String[] parts = text.split("\r\n");
+        String[] parts = text.split("\r\n"); // Split by newlines
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
+        // Loop through skipping the hex sizes (they are on every other line)
         for (int i = 0; i < parts.length - 1; i += 2) {
-            if ("0".equals(parts[i].trim())) break;
+            if ("0".equals(parts[i].trim())) break; // 0 means end of chunked data
             try {
+                // Grab the actual data part and write it
                 out.write(parts[i + 1].getBytes(StandardCharsets.ISO_8859_1));
             } catch (Exception ignored) {}
         }
