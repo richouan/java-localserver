@@ -7,6 +7,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 public class Server {
     private Config config;
@@ -236,6 +238,15 @@ public class Server {
             return;
         }
 
+        if (("GET".equalsIgnoreCase(client.getMethod()) || "POST".equalsIgnoreCase(client.getMethod())) && isCgi(filePath, routeMatch)) {
+            if (!Files.exists(filePath) || Files.isDirectory(filePath)) {
+                sendError(client, serverBlock, 404, "Not Found");
+                return;
+            }
+            handleCgi(client, serverBlock, filePath);
+            return;
+        }
+
         if ("POST".equalsIgnoreCase(client.getMethod())) {
             if (routeMatch.rule.uploadDir != null && !routeMatch.rule.uploadDir.isEmpty()) {
                 handleFileUpload(client, serverBlock, routeMatch);
@@ -301,6 +312,124 @@ public class Server {
             String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded: " + fileName + "</p></body></html>";
             client.prepareResponse(201, "Created", responseHtml, "text/html");
         } catch (IOException e) {
+            sendError(client, serverBlock, 500, "Internal Server Error");
+        }
+    }
+
+    private boolean isCgi(Path filePath, Router.RouteMatch routeMatch) {
+        if (filePath == null || filePath.getFileName() == null) return false;
+        String name = filePath.getFileName().toString().toLowerCase();
+        if (routeMatch.rule.cgiExtension != null && !routeMatch.rule.cgiExtension.isEmpty()) {
+            if (name.endsWith(routeMatch.rule.cgiExtension.toLowerCase())) {
+                return true;
+            }
+        }
+        return name.endsWith(".py") || name.endsWith(".sh") || name.endsWith(".pl") || name.endsWith(".cgi");
+    }
+
+    private List<String> buildCgiCommand(Path scriptPath) {
+        List<String> cmd = new ArrayList<>();
+        String name = scriptPath.getFileName().toString().toLowerCase();
+        boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
+
+        if (name.endsWith(".py")) {
+            cmd.add(isWin ? "python" : "python3");
+        } else if (name.endsWith(".sh")) {
+            cmd.add(isWin && Files.exists(Paths.get("C:\\Program Files\\Git\\bin\\bash.exe"))
+                    ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
+        } else if (name.endsWith(".pl")) {
+            cmd.add("perl");
+        }
+        cmd.add(scriptPath.toAbsolutePath().toString());
+        return cmd;
+    }
+
+    private void handleCgi(Client client, Config.ServerBlock serverBlock, Path scriptPath) {
+        try {
+            List<String> cmd = buildCgiCommand(scriptPath);
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            if (scriptPath.getParent() != null) {
+                pb.directory(scriptPath.getParent().toFile());
+            }
+
+            Map<String, String> env = pb.environment();
+            env.put("REQUEST_METHOD", client.getMethod());
+            env.put("QUERY_STRING", client.getQueryString() != null ? client.getQueryString() : "");
+            env.put("CONTENT_LENGTH", String.valueOf(client.getBodySize()));
+            env.put("CONTENT_TYPE", client.getHeaders().getOrDefault("content-type", ""));
+            env.put("PATH_INFO", client.getPath());
+            env.put("SCRIPT_FILENAME", scriptPath.toAbsolutePath().toString());
+            env.put("SERVER_PROTOCOL", "HTTP/1.1");
+            env.put("GATEWAY_INTERFACE", "CGI/1.1");
+            env.put("REDIRECT_STATUS", "200");
+            env.put("SERVER_NAME", serverBlock.serverName.isEmpty() ? serverBlock.host : serverBlock.serverName);
+            env.put("SERVER_PORT", String.valueOf(serverBlock.port));
+
+            for (Map.Entry<String, String> h : client.getHeaders().entrySet()) {
+                env.put("HTTP_" + h.getKey().toUpperCase().replace("-", "_"), h.getValue());
+            }
+
+            Process p = pb.start();
+
+            if (client.getBodySize() > 0) {
+                p.getOutputStream().write(client.getBody());
+                p.getOutputStream().flush();
+            }
+            p.getOutputStream().close();
+
+            boolean finished = p.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                sendError(client, serverBlock, 504, "Gateway Timeout");
+                return;
+            }
+
+            if (p.exitValue() != 0) {
+                sendError(client, serverBlock, 502, "Bad Gateway");
+                return;
+            }
+
+            byte[] output = p.getInputStream().readAllBytes();
+            String outStr = new String(output, StandardCharsets.UTF_8).replace("\r\r\n", "\r\n");
+
+            int headerEnd = outStr.indexOf("\r\n\r\n");
+            int delimLen = 4;
+            if (headerEnd == -1) {
+                headerEnd = outStr.indexOf("\n\n");
+                delimLen = 2;
+            }
+
+            int statusCode = 200;
+            String statusText = "OK";
+            String contentType = "text/html";
+            String bodyPart = outStr;
+
+            if (headerEnd != -1) {
+                String headerPart = outStr.substring(0, headerEnd);
+                bodyPart = outStr.substring(headerEnd + delimLen);
+
+                for (String line : headerPart.split("\r?\n")) {
+                    int colon = line.indexOf(":");
+                    if (colon != -1) {
+                        String name = line.substring(0, colon).trim();
+                        String val = line.substring(colon + 1).trim();
+                        if (name.equalsIgnoreCase("Status")) {
+                            String[] sp = val.split(" ", 2);
+                            try {
+                                statusCode = Integer.parseInt(sp[0]);
+                                if (sp.length > 1) statusText = sp[1];
+                            } catch (NumberFormatException ignored) {}
+                        } else if (name.equalsIgnoreCase("Content-Type")) {
+                            contentType = val;
+                        } else {
+                            client.setResponseHeader(name, val);
+                        }
+                    }
+                }
+            }
+
+            client.prepareResponse(statusCode, statusText, bodyPart, contentType);
+        } catch (Exception e) {
             sendError(client, serverBlock, 500, "Internal Server Error");
         }
     }

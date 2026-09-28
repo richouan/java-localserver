@@ -21,6 +21,7 @@ public class Client {
     private int headerEnd;
     private String method;
     private String path;
+    private String queryString = "";
     private String version;
     private Map<String, String> headers;
     private long contentLength;
@@ -76,6 +77,10 @@ public class Client {
         return this.path;
     }
 
+    public String getQueryString() {
+        return this.queryString;
+    }
+
     public String getVersion() {
         return this.version;
     }
@@ -129,7 +134,15 @@ public class Client {
         if (requestLine.length < 3) return false;
 
         this.method = requestLine[0].trim();
-        this.path = requestLine[1].trim();
+        String fullPath = requestLine[1].trim();
+        int qIdx = fullPath.indexOf("?");
+        if (qIdx != -1) {
+            this.path = fullPath.substring(0, qIdx);
+            this.queryString = fullPath.substring(qIdx + 1);
+        } else {
+            this.path = fullPath;
+            this.queryString = "";
+        }
         this.version = requestLine[2].trim();
 
         for (int i = 1; i < lines.length; i++) {
@@ -234,6 +247,7 @@ public class Client {
         this.responseHeaders.clear();
         this.method = null;
         this.path = null;
+        this.queryString = "";
         this.version = null;
         this.headers.clear();
         this.rawBytes.reset();
