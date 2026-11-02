@@ -16,7 +16,7 @@ public class Router {
 
         Config.RouteRule bestRule = null;
         for (Config.RouteRule r : serverBlock.routes) {
-            if (requestPath.startsWith(r.path)) {
+            if (matchesRoute(requestPath, r.path)) {
                 if (bestRule == null || r.path.length() > bestRule.path.length()) {
                     bestRule = r;
                 }
@@ -56,5 +56,18 @@ public class Router {
 
         match.targetPath = resolved;
         return match;
+    }
+
+    private static boolean matchesRoute(String requestPath, String routePath) {
+        if (routePath.equals("/")) {
+            return true;
+        }
+        if (requestPath.equals(routePath)) {
+            return true;
+        }
+        if (routePath.endsWith("/")) {
+            return requestPath.startsWith(routePath);
+        }
+        return requestPath.startsWith(routePath + "/");
     }
 }

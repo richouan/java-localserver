@@ -5,10 +5,7 @@ out/
 .vscode/
 .idea/
 *.log
-projectsubject.md
-implementation_example.md
+project_subject.md
 audit_subject.md
-task.md
-explanation.md
 *.class
 TestingSuite.java

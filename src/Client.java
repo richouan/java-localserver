@@ -33,6 +33,10 @@ public class Client {
     private FileChannel fileChannel;
     private long fileBytesRemaining;
 
+    private byte[] decodedChunkedBody = null;
+    private int chunkedWireBytes = 0;
+    private boolean chunkedComplete = false;
+
     public Client(SocketChannel channel) {
         this.channel = channel;
         this.readBuffer = ByteBuffer.allocate(8192);
@@ -45,6 +49,13 @@ public class Client {
         this.contentLength = 0;
         this.isChunked = false;
         this.isBadRequest = false;
+        this.decodedChunkedBody = null;
+        this.chunkedWireBytes = 0;
+        this.chunkedComplete = false;
+    }
+
+    public void setKeepAlive(boolean keepAlive) {
+        this.keepAlive = keepAlive;
     }
 
     public boolean isBadRequest() {
@@ -53,6 +64,10 @@ public class Client {
 
     public int getRawBytesSize() {
         return this.rawBytes.size();
+    }
+
+    public int getHeaderSize() {
+        return this.headerEnd != -1 ? this.headerEnd : this.rawBytes.size();
     }
 
     public boolean isChunked() {
@@ -209,7 +224,8 @@ public class Client {
     public int getBodySize() {
         if (!this.headersParsed) return 0;
         if (this.isChunked) {
-            return getBody().length;
+            parseChunked();
+            return this.decodedChunkedBody != null ? this.decodedChunkedBody.length : 0;
         }
         int size = this.rawBytes.size() - (this.headerEnd + 4);
         return Math.max(0, size);
@@ -217,13 +233,13 @@ public class Client {
 
     public byte[] getBody() {
         if (!this.headersParsed) return new byte[0];
+        if (this.isChunked) {
+            parseChunked();
+            return this.decodedChunkedBody != null ? this.decodedChunkedBody : new byte[0];
+        }
         byte[] all = this.rawBytes.toByteArray();
         int start = this.headerEnd + 4;
         if (start >= all.length) return new byte[0];
-
-        if (this.isChunked) {
-            return decodeChunked(all, start);
-        }
 
         int end = (int) Math.min(all.length, start + this.contentLength);
         return Arrays.copyOfRange(all, start, end);
@@ -232,28 +248,109 @@ public class Client {
     public boolean isBodyComplete() {
         if (!this.headersParsed) return false;
         if (this.isChunked) {
-            byte[] all = this.rawBytes.toByteArray();
-            String text = new String(all, this.headerEnd + 4, all.length - (this.headerEnd + 4), StandardCharsets.ISO_8859_1);
-            return text.endsWith("0\r\n\r\n") || text.contains("\r\n0\r\n\r\n");
+            return parseChunked();
         }
         return getBodySize() >= this.contentLength;
     }
 
-    private byte[] decodeChunked(byte[] data, int start) {
-        // Convert to string to easily split chunks
-        String text = new String(data, start, data.length - start, StandardCharsets.ISO_8859_1);
-        String[] parts = text.split("\r\n"); // Split by newlines
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-        // Loop through skipping the hex sizes (they are on every other line)
-        for (int i = 0; i < parts.length - 1; i += 2) {
-            if ("0".equals(parts[i].trim())) break; // 0 means end of chunked data
-            try {
-                // Grab the actual data part and write it
-                out.write(parts[i + 1].getBytes(StandardCharsets.ISO_8859_1));
-            } catch (Exception ignored) {}
+    private boolean parseChunked() {
+        if (this.chunkedComplete && this.decodedChunkedBody != null) {
+            return true;
         }
-        return out.toByteArray();
+
+        byte[] all = this.rawBytes.toByteArray();
+        int start = this.headerEnd + 4;
+        if (start > all.length) {
+            return false;
+        }
+
+        ByteArrayOutputStream bodyOut = new ByteArrayOutputStream();
+        int pos = start;
+
+        while (pos < all.length) {
+            int lineEnd = -1;
+            int delimLen = 0;
+            for (int i = pos; i < all.length; i++) {
+                if (all[i] == '\n') {
+                    if (i > pos && all[i - 1] == '\r') {
+                        lineEnd = i - 1;
+                        delimLen = 2;
+                    } else {
+                        lineEnd = i;
+                        delimLen = 1;
+                    }
+                    break;
+                }
+            }
+
+            if (lineEnd == -1) {
+                return false;
+            }
+
+            String sizeLine = new String(all, pos, lineEnd - pos, StandardCharsets.ISO_8859_1).trim();
+            int scIdx = sizeLine.indexOf(';');
+            if (scIdx != -1) {
+                sizeLine = sizeLine.substring(0, scIdx).trim();
+            }
+
+            int chunkSize;
+            try {
+                chunkSize = Integer.parseInt(sizeLine, 16);
+            } catch (NumberFormatException e) {
+                this.isBadRequest = true;
+                return false;
+            }
+
+            pos = lineEnd + delimLen;
+
+            if (chunkSize == 0) {
+                int trailerEnd = -1;
+                int trailerDelim = 0;
+                for (int i = pos; i < all.length; i++) {
+                    if (all[i] == '\n') {
+                        if (i == pos) {
+                            trailerEnd = i;
+                            trailerDelim = 1;
+                            break;
+                        } else if (i == pos + 1 && all[pos] == '\r') {
+                            trailerEnd = pos;
+                            trailerDelim = 2;
+                            break;
+                        }
+                    }
+                }
+
+                if (trailerEnd == -1) {
+                    return false;
+                }
+
+                pos = trailerEnd + trailerDelim;
+                this.decodedChunkedBody = bodyOut.toByteArray();
+                this.chunkedWireBytes = pos - start;
+                this.chunkedComplete = true;
+                return true;
+            }
+
+            if (pos + chunkSize > all.length) {
+                return false;
+            }
+
+            bodyOut.write(all, pos, chunkSize);
+            pos += chunkSize;
+
+            if (pos >= all.length) {
+                return false;
+            }
+            if (all[pos] == '\r' && pos + 1 < all.length && all[pos + 1] == '\n') {
+                pos += 2;
+            } else if (all[pos] == '\n') {
+                pos += 1;
+            } else {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     public void closeFileChannel() {
@@ -282,7 +379,17 @@ public class Client {
         this.isBadRequest = false;
 
         byte[] all = this.rawBytes.toByteArray();
-        int consumed = (this.headerEnd != -1) ? (this.headerEnd + 4 + (int)this.contentLength) : all.length;
+        int consumed;
+        if (this.headerEnd != -1) {
+            if (this.isChunked) {
+                consumed = this.headerEnd + 4 + this.chunkedWireBytes;
+            } else {
+                consumed = this.headerEnd + 4 + (int) this.contentLength;
+            }
+        } else {
+            consumed = all.length;
+        }
+
         this.rawBytes.reset();
         if (consumed < all.length) {
             this.rawBytes.write(all, consumed, all.length - consumed);
@@ -292,6 +399,9 @@ public class Client {
         this.headerEnd = -1;
         this.contentLength = 0;
         this.isChunked = false;
+        this.decodedChunkedBody = null;
+        this.chunkedWireBytes = 0;
+        this.chunkedComplete = false;
         this.lastActiveTime = System.currentTimeMillis();
     }
 
@@ -326,9 +436,7 @@ public class Client {
         this.responseBuffer = ByteBuffer.wrap(headerBytes);
     }
 
-    public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
-        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
-
+    public void prepareResponse(int statusCode, String statusText, byte[] bodyBytes, String contentType) {
         StringBuilder res = new StringBuilder();
         res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
         res.append("Content-Type: ").append(contentType).append("\r\n");
@@ -345,5 +453,10 @@ public class Client {
         this.responseBuffer.put(headerBytes);
         this.responseBuffer.put(bodyBytes);
         this.responseBuffer.flip();
+    }
+
+    public void prepareResponse(int statusCode, String statusText, String body, String contentType) {
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+        prepareResponse(statusCode, statusText, bodyBytes, contentType);
     }
 }

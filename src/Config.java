@@ -67,7 +67,10 @@ public class Config {
                         currentRoute = null;
                     } else if (currentSection.startsWith("route") && currentServer != null) {
                         currentRoute = new RouteRule();
-                        currentRoute.path = currentSection.replace("route", "").trim();
+                        String rPath = currentSection.length() > 5 ? currentSection.substring(5).trim() : "/";
+                        if (rPath.isEmpty()) rPath = "/";
+                        if (!rPath.startsWith("/")) rPath = "/" + rPath;
+                        currentRoute.path = rPath;
                         currentRoute.root = currentServer.root;
                         currentServer.routes.add(currentRoute);
                     }
@@ -81,10 +84,22 @@ public class Config {
 
                     if (currentSection.equals("server")) {
                         if (key.equals("host")) currentServer.host = value;
-                        else if (key.equals("port")) currentServer.port = Integer.parseInt(value);
+                        else if (key.equals("port")) {
+                            try {
+                                currentServer.port = Integer.parseInt(value);
+                            } catch (NumberFormatException e) {
+                                System.err.println("Invalid port value in config: " + value);
+                            }
+                        }
                         else if (key.equals("server_name")) currentServer.serverName = value;
                         else if (key.equals("root")) currentServer.root = value;
-                        else if (key.equals("body_limit")) currentServer.bodyLimit = Long.parseLong(value);
+                        else if (key.equals("body_limit")) {
+                            try {
+                                currentServer.bodyLimit = Long.parseLong(value);
+                            } catch (NumberFormatException e) {
+                                System.err.println("Invalid body_limit value in config: " + value);
+                            }
+                        }
                     } else if (currentSection.equals("error") || currentSection.equals("errors")) {
                         try {
                             int code = Integer.parseInt(key);
@@ -112,7 +127,23 @@ public class Config {
             config.servers.add(new ServerBlock());
         }
 
+        config.validate();
         return config;
+    }
+
+    public void validate() {
+        Map<String, ServerBlock> seen = new HashMap<>();
+        for (ServerBlock s : this.servers) {
+            String key = s.host + ":" + s.port + ":" + s.serverName.toLowerCase();
+            if (seen.containsKey(key)) {
+                System.err.println("Configuration Error: Duplicate server block detected for " + key);
+            } else {
+                seen.put(key, s);
+            }
+            if (s.port < 1 || s.port > 65535) {
+                System.err.println("Configuration Error: Port out of range (1-65535): " + s.port);
+            }
+        }
     }
 
     public List<ServerBlock> getServers() {

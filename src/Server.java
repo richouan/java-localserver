@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -19,6 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class Server {
@@ -29,6 +32,7 @@ public class Server {
     private Map<String, Integer> sessions = new HashMap<>();
     private long startTime;
     private long requestCount = 0;
+    private ExecutorService cgiExecutor;
 
     private static final long TIMEOUT_MS = 30000;
 
@@ -37,18 +41,28 @@ public class Server {
         this.isRunning = false;
         this.serverChannels = new ArrayList<>();
         this.startTime = System.currentTimeMillis();
+        this.cgiExecutor = Executors.newCachedThreadPool();
     }
 
     public void start() throws IOException {
         // The selector is the core of multiplexing (it watches multiple ports at once)
         this.selector = Selector.open();
 
+        Map<String, Config.ServerBlock> virtualHosts = new HashMap<>();
         Set<Integer> boundPorts = new HashSet<>();
 
         // Loop through config and open a listening socket for each unique port
         for (Config.ServerBlock serverBlock : this.config.getServers()) {
+            String vhostKey = serverBlock.host + ":" + serverBlock.port + ":" + serverBlock.serverName.toLowerCase();
+            if (virtualHosts.containsKey(vhostKey)) {
+                System.err.println("Warning: Duplicate server block detected for " + vhostKey + "; subsequent definition will be ignored.");
+                continue;
+            }
+            virtualHosts.put(vhostKey, serverBlock);
+
             if (boundPorts.contains(serverBlock.port)) {
-                continue; // Skip if we already bound this port
+                System.out.println("Port " + serverBlock.port + " already bound; sharing socket for virtual host '" + serverBlock.serverName + "'.");
+                continue;
             }
 
             try {
@@ -63,7 +77,7 @@ public class Server {
 
                 System.out.println("Listening on " + serverBlock.host + ":" + serverBlock.port);
             } catch (IOException e) {
-                System.err.println("Failed to bind port " + serverBlock.port + ": " + e.getMessage());
+                System.err.println("Failed to bind port " + serverBlock.port + ": " + e.getMessage() + ". Continuing with remaining servers.");
             }
         }
 
@@ -203,16 +217,32 @@ public class Server {
         buffer.get(bytes);
         client.appendBytes(bytes);
 
+        // Protect against giant headers (malicious attacks)
+        if (client.getHeaderSize() > 16384) {
+            client.setKeepAlive(false);
+            sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+            key.interestOps(SelectionKey.OP_WRITE);
+            return;
+        }
+
         // Try to parse headers if we haven't yet
         if (!client.areHeadersParsed()) {
             if (!client.parseHeaders()) {
-                // Protect against giant headers (malicious attacks)
-                if (client.getRawBytesSize() > 16384) {
+                if (client.getHeaderSize() > 16384) {
+                    client.setKeepAlive(false);
                     sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
                     key.interestOps(SelectionKey.OP_WRITE);
                 }
                 return; // Headers not fully received yet
             }
+        }
+
+        // Re-check after parseHeaders established header boundary
+        if (client.getHeaderSize() > 16384) {
+            client.setKeepAlive(false);
+            sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+            key.interestOps(SelectionKey.OP_WRITE);
+            return;
         }
 
         // Check if the request is messed up
@@ -240,23 +270,25 @@ public class Server {
 
         // Once we have the full request, figure out what to do with it
         if (client.isBodyComplete()) {
-            processRequest(client, serverBlock);
-            key.interestOps(SelectionKey.OP_WRITE); // Switch to write mode to send the answer
+            boolean isAsyncCgi = processRequest(client, serverBlock, key);
+            if (!isAsyncCgi) {
+                key.interestOps(SelectionKey.OP_WRITE); // Switch to write mode to send the answer
+            }
         }
     }
 
-    private void processRequest(Client client, Config.ServerBlock serverBlock) throws IOException {
+    private boolean processRequest(Client client, Config.ServerBlock serverBlock, SelectionKey key) throws IOException {
         this.requestCount++;
 
         // Built-in endpoints
         if ("/status".equals(client.getPath()) || "/metrics".equals(client.getPath())) {
             handleStatus(client);
-            return;
+            return false;
         }
 
         if ("/session".equals(client.getPath())) {
             handleSession(client);
-            return;
+            return false;
         }
 
         // Match the request path to a route in our config
@@ -265,13 +297,13 @@ public class Server {
         // Handle redirects (HTTP 301)
         if (routeMatch.isRedirect) {
             client.prepareRedirect(routeMatch.rule.redirect);
-            return;
+            return false;
         }
 
         // Check if the user is allowed to use this method (GET, POST, etc)
         if (!routeMatch.isMethodAllowed) {
             sendError(client, serverBlock, 405, "Method Not Allowed");
-            return;
+            return false;
         }
 
         Path filePath = routeMatch.targetPath;
@@ -280,29 +312,29 @@ public class Server {
         // Security check: Don't let users access files outside the root folder
         if (!filePath.startsWith(rootPath)) {
             sendError(client, serverBlock, 403, "Forbidden");
-            return;
+            return false;
         }
 
-        // If it's a script, run the CGI
+        // If it's a script, run the CGI asynchronously without blocking selector
         if (("GET".equalsIgnoreCase(client.getMethod()) || "POST".equalsIgnoreCase(client.getMethod())) && isCgi(filePath, routeMatch)) {
             if (!Files.exists(filePath) || Files.isDirectory(filePath)) {
                 sendError(client, serverBlock, 404, "Not Found");
-                return;
+                return false;
             }
-            handleCgi(client, serverBlock, filePath);
-            return;
+            handleCgiAsync(client, serverBlock, filePath, key);
+            return true;
         }
 
         // Handle POST file uploads
         if ("POST".equalsIgnoreCase(client.getMethod())) {
             if (routeMatch.rule.uploadDir != null && !routeMatch.rule.uploadDir.isEmpty()) {
                 handleFileUpload(client, serverBlock, routeMatch);
-                return;
+                return false;
             }
 
             String responseBody = "<html><body><h1>200 OK</h1><p>POST body received successfully (" + client.getBodySize() + " bytes).</p></body></html>";
             client.prepareResponse(200, "OK", responseBody, "text/html");
-            return;
+            return false;
         }
 
         // Handle DELETE requests
@@ -317,11 +349,18 @@ public class Server {
             } else {
                 sendError(client, serverBlock, 404, "Not Found");
             }
-            return;
+            return false;
         }
 
         // Handle folders
         if (Files.isDirectory(filePath)) {
+            if (!client.getPath().endsWith("/")) {
+                String qs = client.getQueryString();
+                String target = client.getPath() + "/" + (qs != null && !qs.isEmpty() ? "?" + qs : "");
+                client.prepareRedirect(target);
+                return false;
+            }
+
             if (routeMatch.rule.listing) {
                 // Auto-generate a HTML page showing the folder's files
                 String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
@@ -329,7 +368,7 @@ public class Server {
             } else {
                 sendError(client, serverBlock, 403, "Forbidden");
             }
-            return;
+            return false;
         }
 
         // Serve regular static files (html, css, images)
@@ -339,6 +378,79 @@ public class Server {
         } else {
             sendError(client, serverBlock, 404, "Not Found");
         }
+        return false;
+    }
+
+    private static class ParsedMultipart {
+        String filename;
+        byte[] data;
+        ParsedMultipart(String filename, byte[] data) {
+            this.filename = filename;
+            this.data = data;
+        }
+    }
+
+    private ParsedMultipart parseMultipart(byte[] body, String boundary) {
+        try {
+            byte[] boundaryBytes = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
+            int firstBoundary = indexOf(body, boundaryBytes, 0);
+            if (firstBoundary == -1) return null;
+
+            int headerStart = firstBoundary + boundaryBytes.length;
+            if (headerStart + 2 <= body.length && body[headerStart] == '\r' && body[headerStart + 1] == '\n') {
+                headerStart += 2;
+            }
+
+            byte[] headerEndDelim = new byte[] { '\r', '\n', '\r', '\n' };
+            int headerEnd = indexOf(body, headerEndDelim, headerStart);
+            if (headerEnd == -1) return null;
+
+            String partHeaders = new String(body, headerStart, headerEnd - headerStart, StandardCharsets.ISO_8859_1);
+            String filename = null;
+            for (String line : partHeaders.split("\r\n")) {
+                if (line.toLowerCase().startsWith("content-disposition:")) {
+                    int fnIdx = line.indexOf("filename=\"");
+                    if (fnIdx != -1) {
+                        int fnEnd = line.indexOf("\"", fnIdx + 10);
+                        if (fnEnd != -1) {
+                            filename = line.substring(fnIdx + 10, fnEnd);
+                            if (filename.contains("/") || filename.contains("\\")) {
+                                filename = Paths.get(filename).getFileName().toString();
+                            }
+                        }
+                    }
+                }
+            }
+
+            int contentStart = headerEnd + 4;
+            byte[] endBoundaryBytes = ("\r\n--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
+            int contentEnd = indexOf(body, endBoundaryBytes, contentStart);
+            if (contentEnd == -1) {
+                endBoundaryBytes = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
+                contentEnd = indexOf(body, endBoundaryBytes, contentStart);
+            }
+            if (contentEnd == -1 || contentEnd < contentStart) return null;
+
+            byte[] content = Arrays.copyOfRange(body, contentStart, contentEnd);
+            return new ParsedMultipart(filename, content);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private int indexOf(byte[] source, byte[] target, int fromIndex) {
+        if (target.length == 0) return fromIndex;
+        for (int i = fromIndex; i <= source.length - target.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < target.length; j++) {
+                if (source[i + j] != target[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return i;
+        }
+        return -1;
     }
 
     private void handleFileUpload(Client client, Config.ServerBlock serverBlock, Router.RouteMatch routeMatch) {
@@ -348,10 +460,33 @@ public class Server {
                 Files.createDirectories(uploadDir);
             }
 
-            Path target = routeMatch.targetPath;
-            String fileName = (target != null && !Files.isDirectory(target) && !target.equals(uploadDir))
-                    ? target.getFileName().toString()
-                    : "upload_" + System.currentTimeMillis() + ".dat";
+            String contentType = client.getHeaders().getOrDefault("content-type", "");
+            byte[] fileBytes = client.getBody();
+            String fileName = null;
+
+            if (contentType.toLowerCase().contains("multipart/form-data")) {
+                int bIdx = contentType.indexOf("boundary=");
+                if (bIdx != -1) {
+                    String boundary = contentType.substring(bIdx + 9).trim();
+                    if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+                        boundary = boundary.substring(1, boundary.length() - 1);
+                    }
+                    ParsedMultipart mp = parseMultipart(fileBytes, boundary);
+                    if (mp != null) {
+                        if (mp.filename != null && !mp.filename.isEmpty()) {
+                            fileName = mp.filename;
+                        }
+                        fileBytes = mp.data;
+                    }
+                }
+            }
+
+            if (fileName == null || fileName.isEmpty()) {
+                Path target = routeMatch.targetPath;
+                fileName = (target != null && !Files.isDirectory(target) && !target.equals(uploadDir))
+                        ? target.getFileName().toString()
+                        : "upload_" + System.currentTimeMillis() + ".dat";
+            }
 
             Path destFile = uploadDir.resolve(fileName).normalize();
             if (!destFile.startsWith(uploadDir)) {
@@ -359,8 +494,8 @@ public class Server {
                 return;
             }
 
-            Files.write(destFile, client.getBody());
-            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded: " + fileName + "</p></body></html>";
+            Files.write(destFile, fileBytes);
+            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded successfully: " + fileName + " (" + fileBytes.length + " bytes)</p><p><a href=\"/listing/\">View Directory Listing</a></p></body></html>";
             client.prepareResponse(201, "Created", responseHtml, "text/html");
         } catch (IOException e) {
             sendError(client, serverBlock, 500, "Internal Server Error");
@@ -393,6 +528,25 @@ public class Server {
         }
         cmd.add(scriptPath.toAbsolutePath().toString());
         return cmd;
+    }
+
+    private void handleCgiAsync(Client client, Config.ServerBlock serverBlock, Path scriptPath, SelectionKey key) {
+        key.interestOps(0);
+
+        this.cgiExecutor.submit(() -> {
+            try {
+                handleCgi(client, serverBlock, scriptPath);
+            } catch (Exception e) {
+                sendError(client, serverBlock, 500, "Internal Server Error");
+            } finally {
+                try {
+                    if (key.isValid() && client.getChannel().isOpen()) {
+                        key.interestOps(SelectionKey.OP_WRITE);
+                        this.selector.wakeup();
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
     }
 
     private void handleCgi(Client client, Config.ServerBlock serverBlock, Path scriptPath) {
@@ -446,24 +600,31 @@ public class Server {
 
             // Read what the CGI script printed
             byte[] output = p.getInputStream().readAllBytes();
-            String outStr = new String(output, StandardCharsets.UTF_8).replace("\r\r\n", "\r\n");
 
-            // Split the CGI output into Headers and Body
-            int headerEnd = outStr.indexOf("\r\n\r\n");
-            int delimLen = 4;
-            if (headerEnd == -1) {
-                headerEnd = outStr.indexOf("\n\n");
-                delimLen = 2;
+            // Locate \r\n\r\n or \n\n delimiter in raw bytes
+            int headerEnd = -1;
+            int delimLen = 0;
+            for (int i = 0; i < output.length - 1; i++) {
+                if (output[i] == '\r' && i + 3 < output.length && output[i + 1] == '\n' && output[i + 2] == '\r' && output[i + 3] == '\n') {
+                    headerEnd = i;
+                    delimLen = 4;
+                    break;
+                } else if (output[i] == '\n' && output[i + 1] == '\n') {
+                    headerEnd = i;
+                    delimLen = 2;
+                    break;
+                }
             }
 
             int statusCode = 200;
             String statusText = "OK";
             String contentType = "text/html";
-            String bodyPart = outStr;
+            byte[] bodyBytes;
 
             if (headerEnd != -1) {
-                String headerPart = outStr.substring(0, headerEnd);
-                bodyPart = outStr.substring(headerEnd + delimLen);
+                String headerPart = new String(output, 0, headerEnd, StandardCharsets.UTF_8);
+                int bodyStart = headerEnd + delimLen;
+                bodyBytes = (bodyStart < output.length) ? Arrays.copyOfRange(output, bodyStart, output.length) : new byte[0];
 
                 // Parse the headers returned by the CGI
                 for (String line : headerPart.split("\r?\n")) {
@@ -484,9 +645,11 @@ public class Server {
                         }
                     }
                 }
+            } else {
+                bodyBytes = output;
             }
 
-            client.prepareResponse(statusCode, statusText, bodyPart, contentType);
+            client.prepareResponse(statusCode, statusText, bodyBytes, contentType);
         } catch (Exception e) {
             sendError(client, serverBlock, 500, "Internal Server Error");
         }
@@ -560,6 +723,10 @@ public class Server {
     }
 
     private void sendError(Client client, Config.ServerBlock serverBlock, int statusCode, String defaultReason) {
+        if (statusCode >= 400) {
+            client.setKeepAlive(false);
+        }
+
         String customPath = null;
         if (serverBlock != null && serverBlock.errorPages.containsKey(statusCode)) {
             customPath = serverBlock.errorPages.get(statusCode);
@@ -593,6 +760,9 @@ public class Server {
             if (headerBuffer.hasRemaining()) {
                 return; // Still more headers to send, come back later
             }
+            if (client.getFileChannel() != null && client.getFileBytesRemaining() > 0) {
+                return; // Headers sent; next select cycle will write file chunks
+            }
         }
 
         // Then, send the actual file or body if there is one
@@ -604,9 +774,7 @@ public class Server {
             if (fileBuf.hasRemaining()) {
                 channel.write(fileBuf);
                 client.updateActivity();
-                if (fileBuf.hasRemaining()) {
-                    return;
-                }
+                return; // 1 write per select cycle
             }
 
             // Read a chunk from the file and send it
@@ -617,6 +785,7 @@ public class Server {
                 channel.write(fileBuf);
                 client.decrementFileBytes(readFromFile);
                 client.updateActivity();
+                return; // 1 write per select cycle
             }
 
             if (client.getFileBytesRemaining() > 0 || fileBuf.hasRemaining()) {
@@ -673,6 +842,11 @@ public class Server {
             } catch (IOException e) {
             }
         }
+
+        if (this.cgiExecutor != null && !this.cgiExecutor.isShutdown()) {
+            this.cgiExecutor.shutdownNow();
+        }
+
         System.out.println("Server stopped.");
     }
 }

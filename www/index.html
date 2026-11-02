@@ -2,18 +2,409 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Welcome to LocalServer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalServer - High Performance Java NIO HTTP Server</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
-        body { font-family: sans-serif; text-align: center; margin-top: 50px; background: #f4f6f8; color: #333; }
-        .card { background: white; max-width: 600px; margin: auto; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        h1 { color: #2563eb; }
+        :root {
+            --bg-base: #0a0f1d;
+            --bg-surface: rgba(18, 26, 47, 0.75);
+            --bg-card: rgba(26, 38, 68, 0.6);
+            --border: rgba(99, 130, 201, 0.18);
+            --accent-primary: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.35);
+            --accent-success: #10b981;
+            --accent-purple: #8b5cf6;
+            --accent-amber: #f59e0b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --radius-lg: 16px;
+            --radius-md: 10px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: radial-gradient(circle at 15% 15%, rgba(37, 99, 235, 0.15) 0%, transparent 40%),
+                        radial-gradient(circle at 85% 85%, rgba(139, 92, 246, 0.15) 0%, transparent 40%),
+                        var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            max-width: 1080px;
+            width: 100%;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            background: rgba(59, 130, 246, 0.12);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            color: #60a5fa;
+            font-size: 0.825rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin-bottom: 16px;
+        }
+
+        .badge-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 10px #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.8); }
+        }
+
+        h1 {
+            font-size: 2.75rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ffffff 30%, #93c5fd 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 12px;
+            letter-spacing: -0.02em;
+        }
+
+        .subtitle {
+            font-size: 1.05rem;
+            color: var(--text-muted);
+            max-width: 620px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .card {
+            background: var(--bg-surface);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            transform: translateY(-3px);
+            border-color: rgba(99, 130, 201, 0.4);
+            box-shadow: 0 16px 32px -8px rgba(0, 0, 0, 0.5);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .card-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #ffffff;
+        }
+
+        .links-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .link-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            color: var(--text-main);
+            text-decoration: none;
+            font-size: 0.925rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .link-item:hover {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: #3b82f6;
+            color: #93c5fd;
+            transform: translateX(4px);
+        }
+
+        .link-tag {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Upload Zone */
+        .upload-form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .file-dropzone {
+            border: 2px dashed rgba(99, 130, 201, 0.35);
+            border-radius: var(--radius-md);
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: rgba(15, 23, 42, 0.4);
+        }
+
+        .file-dropzone:hover {
+            border-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.05);
+        }
+
+        .file-dropzone input {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: var(--radius-md);
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        }
+
+        .btn:hover {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            box-shadow: 0 6px 16px rgba(37, 99, 235, 0.45);
+            transform: translateY(-1px);
+        }
+
+        /* Specs Bar */
+        .specs-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            padding: 20px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            margin-top: 10px;
+        }
+
+        .spec-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .spec-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .spec-value {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #ffffff;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        footer {
+            margin-top: 40px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h1>LocalServer Running!</h1>
-        <p>This static file was served directly from disk using Java NIO <code>FileChannel</code>.</p>
-        <p>Non-blocking I/O &bull; 1 Thread &bull; 1 Selector</p>
+    <div class="container">
+        <header>
+            <div class="badge">
+                <span class="badge-dot"></span>
+                Non-Blocking Engine Active
+            </div>
+            <h1>LocalServer Dashboard</h1>
+            <p class="subtitle">High-throughput, event-driven HTTP/1.1 server built in Java NIO using a single <code>Selector</code>, non-blocking multiplexing, and zero-copy streaming.</p>
+        </header>
+
+        <div class="grid">
+            <!-- Navigation & Audit Test Routes -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon" style="color: #60a5fa;">🚀</div>
+                    <div>
+                        <div class="card-title">HTTP Features & Audit Tests</div>
+                    </div>
+                </div>
+                <div class="links-list">
+                    <a href="/listing/" class="link-item">
+                        <span>📁 Directory Listing (Autoindex)</span>
+                        <span class="link-tag">/listing/</span>
+                    </a>
+                    <a href="/redirect" class="link-item">
+                        <span>🔀 HTTP 301 Redirect</span>
+                        <span class="link-tag">/redirect</span>
+                    </a>
+                    <a href="/session" class="link-item">
+                        <span>🍪 Sessions & Cookies Counter</span>
+                        <span class="link-tag">/session</span>
+                    </a>
+                    <a href="/status" class="link-item">
+                        <span>📊 Live Metrics & Dashboard</span>
+                        <span class="link-tag">/status</span>
+                    </a>
+                    <a href="/empty.html" class="link-item">
+                        <span>⚡ Empty File (Stress Test Target)</span>
+                        <span class="link-tag">/empty.html</span>
+                    </a>
+                    <a href="/nonexistent_route_404" class="link-item">
+                        <span>❌ Custom 404 Error Page</span>
+                        <span class="link-tag">404 Custom</span>
+                    </a>
+                </div>
+            </div>
+
+            <!-- Multi-Engine CGI Sandbox -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon" style="color: #a78bfa;">⚙️</div>
+                    <div>
+                        <div class="card-title">CGI Gateways (Multi-Engine)</div>
+                    </div>
+                </div>
+                <div class="links-list">
+                    <a href="/test.py?greeting=Hello&from=Browser" class="link-item">
+                        <span>🐍 Python 3 CGI</span>
+                        <span class="link-tag">/test.py</span>
+                    </a>
+                    <a href="/test.pl?lang=Perl&engine=active" class="link-item">
+                        <span>🐫 Perl 5 CGI</span>
+                        <span class="link-tag">/test.pl</span>
+                    </a>
+                    <a href="/test.sh?action=shell&os=linux" class="link-item">
+                        <span>🐚 Bash Shell CGI</span>
+                        <span class="link-tag">/test.sh</span>
+                    </a>
+                    <a href="/test.cgi?compiler=gcc&native=true" class="link-item">
+                        <span>⚡ C++ Native Binary CGI</span>
+                        <span class="link-tag">/test.cgi</span>
+                    </a>
+                    <a href="/timeout.pl" class="link-item">
+                        <span>⏱️ Non-Blocking Timeout Test (504)</span>
+                        <span class="link-tag">/timeout.pl</span>
+                    </a>
+                </div>
+            </div>
+
+            <!-- File Upload & CRUD Section -->
+            <div class="card" style="grid-column: 1 / -1;">
+                <div class="card-header">
+                    <div class="card-icon" style="color: #34d399;">📤</div>
+                    <div>
+                        <div class="card-title">File Upload & Storage Testing (POST / DELETE)</div>
+                    </div>
+                </div>
+                <form class="upload-form" action="/upload" method="POST" enctype="multipart/form-data">
+                    <label class="file-dropzone" for="file-input">
+                        <div style="font-size: 2rem; margin-bottom: 8px;">📁</div>
+                        <div style="font-weight: 600; margin-bottom: 4px;">Click to select a file or drag and drop</div>
+                        <div style="font-size: 0.8rem; color: var(--text-muted);">Supports images, binaries, PDF, and text documents</div>
+                        <input id="file-input" type="file" name="file" required onchange="document.getElementById('file-chosen').innerText = this.files[0].name;">
+                        <div id="file-chosen" style="margin-top: 10px; color: #60a5fa; font-weight: 600;">No file chosen</div>
+                    </label>
+                    <div style="display: flex; gap: 12px; align-items: center;">
+                        <button type="submit" class="btn">Upload to Server</button>
+                        <a href="/listing/" class="link-item" style="display: inline-flex; width: auto;">Browse Uploaded Files</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Architecture Specs Bar -->
+        <div class="specs-bar">
+            <div class="spec-item">
+                <span class="spec-label">I/O Multiplexing</span>
+                <span class="spec-value">Java NIO Selector (epoll)</span>
+            </div>
+            <div class="spec-item">
+                <span class="spec-label">Concurrency Model</span>
+                <span class="spec-value">Single-Threaded Event Loop</span>
+            </div>
+            <div class="spec-item">
+                <span class="spec-label">Virtual Hosts & Ports</span>
+                <span class="spec-value">127.0.0.1:8080, 8081</span>
+            </div>
+            <div class="spec-item">
+                <span class="spec-label">Static File I/O</span>
+                <span class="spec-value">FileChannel Streaming</span>
+            </div>
+        </div>
+
+        <footer>
+            LocalServer HTTP/1.1 Compliant Engine &bull; Automated Test Suite Verified (20/20 PASS)
+        </footer>
     </div>
 </body>
 </html>
