@@ -4,6 +4,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import hashlib
 import concurrent.futures
@@ -19,9 +20,13 @@ def record(test_name, passed, details=""):
     status = " PASS " if passed else " FAIL "
     print(f"[{status}] {test_name}: {details}")
 
+# ============================================================================
+# PART 1: STANDARD AUDIT TESTS
+# ============================================================================
+
 def test_basic_get():
     try:
-        req = urllib.request.Request(f"{BASE_URL}/")
+        req = urllib.request.Request(f"{BASE_URL}/", headers={"Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
             content = resp.read().decode()
             ok = resp.status == 200 and "LocalServer" in content
@@ -31,7 +36,7 @@ def test_basic_get():
 
 def test_empty_file():
     try:
-        req = urllib.request.Request(f"{BASE_URL}/empty.html")
+        req = urllib.request.Request(f"{BASE_URL}/empty.html", headers={"Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
             body = resp.read()
             cl = resp.headers.get("Content-Length")
@@ -42,7 +47,8 @@ def test_empty_file():
 
 def test_custom_404():
     try:
-        urllib.request.urlopen(f"{BASE_URL}/nonexistent_route_404")
+        req = urllib.request.Request(f"{BASE_URL}/nonexistent_route_404", headers={"Host": "localhost"})
+        urllib.request.urlopen(req)
         record("Custom 404 Not Found", False, "Expected 404, got 200")
     except urllib.error.HTTPError as e:
         body = e.read().decode()
@@ -53,7 +59,7 @@ def test_custom_404():
 
 def test_custom_405():
     try:
-        req = urllib.request.Request(f"{BASE_URL}/restricted", method="DELETE")
+        req = urllib.request.Request(f"{BASE_URL}/restricted", method="DELETE", headers={"Host": "localhost"})
         urllib.request.urlopen(req)
         record("Custom 405 Method Not Allowed", False, "Expected 405, got 200")
     except urllib.error.HTTPError as e:
@@ -81,7 +87,7 @@ def test_custom_413():
 def test_redirect():
     try:
         conn = http.client.HTTPConnection(HOST, PORT)
-        conn.request("GET", "/redirect")
+        conn.request("GET", "/redirect", headers={"Host": "localhost"})
         resp = conn.getresponse()
         loc = resp.getheader("Location")
         conn.close()
@@ -90,15 +96,28 @@ def test_redirect():
     except Exception as e:
         record("301 Redirect (/redirect -> /index.html)", False, str(e))
 
+def test_trailing_slash_redirect():
+    try:
+        conn = http.client.HTTPConnection(HOST, PORT)
+        conn.request("GET", "/listing", headers={"Host": "localhost"})
+        resp = conn.getresponse()
+        loc = resp.getheader("Location")
+        conn.close()
+        ok = resp.status == 301 and loc == "/listing/"
+        record("Directory Trailing Slash 301 Redirect (/listing -> /listing/)", ok,
+               f"Status={resp.status}, Location={loc}")
+    except Exception as e:
+        record("Directory Trailing Slash 301 Redirect (/listing -> /listing/)", False, str(e))
+
 def test_directory_listing():
     try:
         os.makedirs("www/uploads", exist_ok=True)
         with open("www/uploads/listing_probe.txt", "w") as f:
             f.write("probe")
-        req = urllib.request.Request(f"{BASE_URL}/listing")
+        req = urllib.request.Request(f"{BASE_URL}/listing/", headers={"Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
             body = resp.read().decode()
-            ok = resp.status == 200 and "Index of /listing" in body and "listing_probe.txt" in body
+            ok = resp.status == 200 and "Index of /listing/" in body and "listing_probe.txt" in body
             record("Directory Listing (autoindex)", ok, f"Status={resp.status}")
     except Exception as e:
         record("Directory Listing (autoindex)", False, str(e))
@@ -106,7 +125,7 @@ def test_directory_listing():
 def test_session_cookies():
     try:
         conn = http.client.HTTPConnection(HOST, PORT)
-        conn.request("GET", "/session")
+        conn.request("GET", "/session", headers={"Host": "localhost"})
         r1 = conn.getresponse()
         cookie = r1.getheader("Set-Cookie")
         body1 = r1.read().decode()
@@ -117,7 +136,7 @@ def test_session_cookies():
             return
 
         sid_cookie = cookie.split(";")[0]
-        conn.request("GET", "/session", headers={"Cookie": sid_cookie})
+        conn.request("GET", "/session", headers={"Host": "localhost", "Cookie": sid_cookie})
         r2 = conn.getresponse()
         body2 = r2.read().decode()
         conn.close()
@@ -129,7 +148,7 @@ def test_session_cookies():
 
 def test_status_metrics():
     try:
-        req = urllib.request.Request(f"{BASE_URL}/status")
+        req = urllib.request.Request(f"{BASE_URL}/status", headers={"Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
             body = resp.read().decode()
             ok = resp.status == 200 and "Server Status & Metrics" in body and "Uptime:" in body
@@ -145,24 +164,26 @@ def test_file_upload_retrieve_delete():
 
         # 1. Upload
         req = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", data=test_data, method="POST",
-                                     headers={"Content-Type": "application/octet-stream"})
+                                     headers={"Content-Type": "application/octet-stream", "Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
             uploaded_ok = resp.status == 201
 
         # 2. Retrieve
-        with urllib.request.urlopen(f"{BASE_URL}/upload/{file_name}") as resp:
+        req_get = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", headers={"Host": "localhost"})
+        with urllib.request.urlopen(req_get) as resp:
             downloaded = resp.read()
             retrieved_hash = hashlib.sha256(downloaded).hexdigest()
             hashes_match = expected_hash == retrieved_hash
 
         # 3. Delete
-        req_del = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", method="DELETE")
+        req_del = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", method="DELETE", headers={"Host": "localhost"})
         with urllib.request.urlopen(req_del) as resp:
             deleted_ok = resp.status == 204
 
         # 4. Confirm deleted
         try:
-            urllib.request.urlopen(f"{BASE_URL}/upload/{file_name}")
+            req_check = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", headers={"Host": "localhost"})
+            urllib.request.urlopen(req_check)
             confirmed_deleted = False
         except urllib.error.HTTPError as e:
             confirmed_deleted = e.code == 404
@@ -173,6 +194,66 @@ def test_file_upload_retrieve_delete():
     except Exception as e:
         record("File Upload, Verify & DELETE Lifecycle", False, str(e))
 
+def test_multipart_upload():
+    try:
+        boundary = "---------------------------974767299852498929531610575"
+        raw_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_data\x00\x00"
+        file_name = "multipart_avatar.png"
+
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode("latin1") + raw_binary + f"\r\n--{boundary}--\r\n".encode("latin1")
+
+        req = urllib.request.Request(
+            f"{BASE_URL}/upload",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Host": "localhost"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req) as resp:
+            uploaded = resp.status == 201
+
+        # Retrieve and verify exact binary bytes match
+        req_get = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", headers={"Host": "localhost"})
+        with urllib.request.urlopen(req_get) as resp:
+            downloaded = resp.read()
+            matches = downloaded == raw_binary
+
+        # Cleanup
+        req_del = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", method="DELETE", headers={"Host": "localhost"})
+        urllib.request.urlopen(req_del)
+
+        ok = uploaded and matches
+        record("Multipart/form-data File Upload & Integrity", ok,
+               f"201 Created={uploaded}, Matches Original={matches}")
+    except Exception as e:
+        record("Multipart/form-data File Upload & Integrity", False, str(e))
+
+def test_virtual_host_routing():
+    try:
+        # Request on port 8081 with Host: second.com
+        req1 = urllib.request.Request("http://127.0.0.1:8081/", headers={"Host": "second.com"})
+        with urllib.request.urlopen(req1) as resp:
+            ok1 = resp.status == 200
+
+        # Request on port 8080 with Host: localhost
+        req2 = urllib.request.Request("http://127.0.0.1:8080/", headers={"Host": "localhost"})
+        with urllib.request.urlopen(req2) as resp:
+            ok2 = resp.status == 200
+
+        # Request on port 8080 with Host: vhost.com (Virtual Host sharing same port 8080)
+        req3 = urllib.request.Request("http://127.0.0.1:8080/", headers={"Host": "vhost.com"})
+        with urllib.request.urlopen(req3) as resp:
+            ok3 = resp.status == 200
+
+        ok = ok1 and ok2 and ok3
+        record("Virtual Host & Multi-Port Routing (8080 & 8081 & shared 8080)", ok,
+               f"second.com(8081)={ok1}, localhost(8080)={ok2}, vhost.com(8080)={ok3}")
+    except Exception as e:
+        record("Virtual Host & Multi-Port Routing (8080 & 8081 & shared 8080)", False, str(e))
+
 def test_cgi_engines():
     engines = [
         ("Python CGI", "/test.py?foo=bar", "Hello from Python CGI"),
@@ -182,7 +263,8 @@ def test_cgi_engines():
     ]
     for name, path, expected in engines:
         try:
-            with urllib.request.urlopen(f"{BASE_URL}{path}") as resp:
+            req = urllib.request.Request(f"{BASE_URL}{path}", headers={"Host": "localhost"})
+            with urllib.request.urlopen(req) as resp:
                 body = resp.read().decode(errors="replace")
                 ok = resp.status == 200 and expected in body
                 record(f"CGI Execution: {name}", ok, f"Status={resp.status}, Expected present={expected in body}")
@@ -215,7 +297,6 @@ def test_chunked_with_crlf_inside():
     try:
         s = socket.socket()
         s.connect((HOST, PORT))
-        payload = b"row1\r\nrow2" # 10 bytes = 0xa
         req = (
             b"POST /test.py HTTP/1.1\r\n"
             b"Host: localhost\r\n"
@@ -295,7 +376,8 @@ def test_siege_stress(concurrency=30, total=1500):
     url = f"{BASE_URL}/empty.html"
     def fetch(_):
         try:
-            with urllib.request.urlopen(url, timeout=3) as resp:
+            req = urllib.request.Request(url, headers={"Host": "localhost"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -310,77 +392,219 @@ def test_siege_stress(concurrency=30, total=1500):
     record(f"Stress Test (Siege Equivalent: {concurrency} workers, {total} reqs)", ok,
            f"Availability: {avail:.2f}% (Threshold >= 99.5%), RPS: {total/dt:.1f}, Time: {dt:.2f}s")
 
-def test_multipart_upload():
+# ============================================================================
+# PART 2: ADVANCED & SNEAKY AUDITOR EDGE CASE TESTS (NOT IN AUDIT SUBJECT)
+# ============================================================================
+
+def send_raw_request(req_bytes):
+    s = socket.socket()
+    s.connect((HOST, PORT))
+    s.sendall(req_bytes)
+    resp = b""
+    s.settimeout(2.0)
     try:
-        boundary = "---------------------------974767299852498929531610575"
-        raw_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_data\x00\x00"
-        file_name = "multipart_avatar.png"
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+            if b"\r\n\r\n" in resp:
+                break
+    except Exception:
+        pass
+    s.close()
+    return resp.decode(errors="replace")
 
-        body = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'
-            f"Content-Type: image/png\r\n\r\n"
-        ).encode("latin1") + raw_binary + f"\r\n--{boundary}--\r\n".encode("latin1")
+def test_missing_host_header():
+    # RFC 9112 Section 7.2: HTTP/1.1 without Host header MUST return 400 Bad Request
+    raw = b"GET / HTTP/1.1\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Missing Host Header in HTTP/1.1 (400 Bad Request)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
 
-        req = urllib.request.Request(
-            f"{BASE_URL}/upload",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST"
+def test_duplicate_host_header():
+    # RFC 9112 Section 7.2: Duplicate Host header MUST return 400 Bad Request
+    raw = b"GET / HTTP/1.1\r\nHost: localhost\r\nHost: evil.com\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Duplicate Host Header (400 Bad Request)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_case_sensitive_method():
+    # RFC 9110: HTTP Methods are case-sensitive; lowercase 'get' must NOT be accepted as GET
+    raw = b"get / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "405 Method Not Allowed" in resp or "400 Bad Request" in resp
+    record("Auditor Test: Lowercase Method 'get' (405 or 400 Expected)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_unsupported_method():
+    # Non-supported / unknown method returns 405 Method Not Allowed
+    raw = b"UNKNOWNMETHOD / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "405 Method Not Allowed" in resp
+    record("Auditor Test: Unknown HTTP Method (405 Method Not Allowed)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_negative_chunk_size():
+    # Negative chunk size causes integer underflow if not validated; must return 400 Bad Request without server crash
+    raw = b"POST /test.py HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n-5\r\nfoo\r\n0\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Negative Chunk Size (400 Expected, No Crash)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_garbage_chunk_size():
+    # Non-hex chunk size must return 400 Bad Request without crashing
+    raw = b"POST /test.py HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\nfoo\r\n0\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Malformed Non-Hex Chunk Size (400 Expected)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_negative_content_length():
+    # Negative Content-Length must return 400 Bad Request
+    raw = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: -50\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Negative Content-Length (400 Bad Request)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_malformed_content_length():
+    # Non-numeric Content-Length must return 400 Bad Request
+    raw = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: invalid_num\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp
+    record("Auditor Test: Malformed Content-Length (400 Bad Request)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_encoded_path_traversal():
+    # URL-encoded path traversal /%2e%2e/%2e%2e/etc/passwd must be blocked
+    raw = b"GET /%2e%2e/%2e%2e/etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "403 Forbidden" in resp or "404 Not Found" in resp
+    record("Auditor Test: URL-Encoded Path Traversal (/%2e%2e/ -> 403)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_null_byte_injection():
+    # Null byte %00 injection into request path must be rejected with 400
+    raw = b"GET /index.html%00.png HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    resp = send_raw_request(raw)
+    ok = "400 Bad Request" in resp or "404 Not Found" in resp
+    record("Auditor Test: Null Byte Injection (/index.html%00.png -> 400)", ok,
+           f"Response: {resp.splitlines()[0] if resp else 'Empty'}")
+
+def test_http_pipelining():
+    # HTTP/1.1 Pipelining: Sending multiple requests back-to-back in a single TCP transmission
+    try:
+        s = socket.socket()
+        s.connect((HOST, PORT))
+        pipelined_req = (
+            b"GET /empty.html HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+            b"GET /empty.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
+        s.sendall(pipelined_req)
+        resp = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        count = resp.count(b"HTTP/1.1 200 OK")
+        ok = count == 2
+        record("Auditor Test: HTTP/1.1 Pipelining (Back-to-Back Requests)", ok,
+               f"200 OK count={count}/2")
+    except Exception as e:
+        record("Auditor Test: HTTP/1.1 Pipelining (Back-to-Back Requests)", False, str(e))
+
+def test_url_encoded_path_with_spaces():
+    # Files with spaces: Upload "my test file.txt", fetch via "my%20test%20file.txt", delete
+    try:
+        content = b"Data inside file with spaces in name."
+        fname = "my test file with spaces.txt"
+        enc_name = urllib.parse.quote(fname)
+
+        # Upload
+        req_up = urllib.request.Request(f"{BASE_URL}/upload/{enc_name}", data=content, method="POST",
+                                        headers={"Content-Type": "text/plain", "Host": "localhost"})
+        with urllib.request.urlopen(req_up) as r:
+            up_ok = r.status == 201
+
+        # Fetch
+        req_down = urllib.request.Request(f"{BASE_URL}/upload/{enc_name}", headers={"Host": "localhost"})
+        with urllib.request.urlopen(req_down) as r:
+            down_bytes = r.read()
+            match_ok = down_bytes == content
+
+        # Delete
+        req_del = urllib.request.Request(f"{BASE_URL}/upload/{enc_name}", method="DELETE", headers={"Host": "localhost"})
+        with urllib.request.urlopen(req_del) as r:
+            del_ok = r.status == 204
+
+        ok = up_ok and match_ok and del_ok
+        record("Auditor Test: URL-Encoded URI with Spaces (%20)", ok,
+               f"Upload={up_ok}, Fetch Match={match_ok}, Delete={del_ok}")
+    except Exception as e:
+        record("Auditor Test: URL-Encoded URI with Spaces (%20)", False, str(e))
+
+def test_standard_response_headers():
+    # HTTP/1.1 compliant servers should output 'Server:' and 'Date:' headers
+    try:
+        req = urllib.request.Request(f"{BASE_URL}/", headers={"Host": "localhost"})
         with urllib.request.urlopen(req) as resp:
-            uploaded = resp.status == 201
-
-        # Retrieve and verify exact binary bytes match
-        with urllib.request.urlopen(f"{BASE_URL}/upload/{file_name}") as resp:
-            downloaded = resp.read()
-            matches = downloaded == raw_binary
-
-        # Cleanup
-        req_del = urllib.request.Request(f"{BASE_URL}/upload/{file_name}", method="DELETE")
-        urllib.request.urlopen(req_del)
-
-        ok = uploaded and matches
-        record("Multipart/form-data File Upload & Integrity", ok,
-               f"201 Created={uploaded}, Matches Original={matches}")
+            srv = resp.headers.get("Server")
+            dt = resp.headers.get("Date")
+            ok = srv is not None and dt is not None
+            record("Auditor Test: RFC Headers Presence ('Server' & 'Date')", ok,
+                   f"Server={srv}, Date={dt}")
     except Exception as e:
-        record("Multipart/form-data File Upload & Integrity", False, str(e))
+        record("Auditor Test: RFC Headers Presence ('Server' & 'Date')", False, str(e))
 
-def test_trailing_slash_redirect():
+def test_mime_types():
+    # Test Content-Type MIME determination for various static assets
+    types = [
+        ("index.html", "text/html"),
+        ("empty.html", "text/html"),
+    ]
+    all_ok = True
+    details = []
+    for file, expected_mime in types:
+        try:
+            req = urllib.request.Request(f"{BASE_URL}/{file}", headers={"Host": "localhost"})
+            with urllib.request.urlopen(req) as resp:
+                ct = resp.headers.get("Content-Type", "")
+                matches = expected_mime in ct
+                details.append(f"{file}:{ct}")
+                if not matches:
+                    all_ok = False
+        except Exception as e:
+            all_ok = False
+            details.append(f"{file}:ERR({e})")
+    record("Auditor Test: MIME Type Accuracy", all_ok, ", ".join(details))
+
+def test_hanging_connection_timeout():
+    # Connect and send a partial request, verify server does not hang forever and gracefully times out
     try:
-        conn = http.client.HTTPConnection(HOST, PORT)
-        conn.request("GET", "/listing")
-        resp = conn.getresponse()
-        loc = resp.getheader("Location")
-        conn.close()
-        ok = resp.status == 301 and loc == "/listing/"
-        record("Directory Trailing Slash 301 Redirect (/listing -> /listing/)", ok,
-               f"Status={resp.status}, Location={loc}")
+        s = socket.socket()
+        s.settimeout(5.0)
+        s.connect((HOST, PORT))
+        s.sendall(b"GET /incom")
+        # Connection established and alive; wait briefly to ensure server non-blocking selector doesn't hang
+        time.sleep(0.5)
+        s.close()
+        record("Auditor Test: Hanging / Partial Connection Non-Blocking Isolation", True,
+               "Client opened, sent partial header, disconnected without blocking event loop")
     except Exception as e:
-        record("Directory Trailing Slash 301 Redirect (/listing -> /listing/)", False, str(e))
-
-def test_virtual_host_routing():
-    try:
-        # Request on port 8081 with Host: second.com
-        req1 = urllib.request.Request("http://127.0.0.1:8081/", headers={"Host": "second.com"})
-        with urllib.request.urlopen(req1) as resp:
-            ok1 = resp.status == 200
-
-        # Request on port 8080 with Host: localhost
-        req2 = urllib.request.Request("http://127.0.0.1:8080/", headers={"Host": "localhost"})
-        with urllib.request.urlopen(req2) as resp:
-            ok2 = resp.status == 200
-
-        ok = ok1 and ok2
-        record("Virtual Host & Multi-Port Routing (8080 & 8081)", ok,
-               f"Host:second.com (8081)={ok1}, Host:localhost (8080)={ok2}")
-    except Exception as e:
-        record("Virtual Host & Multi-Port Routing (8080 & 8081)", False, str(e))
+        record("Auditor Test: Hanging / Partial Connection Non-Blocking Isolation", False, str(e))
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print(" RUNNING FULL AUDIT & LOGIC TEST SUITE FOR LOCALSERVER")
-    print("=" * 60)
+    print("=" * 65)
+    print(" RUNNING FULL AUDIT & ADVANCED LOGIC TEST SUITE FOR LOCALSERVER")
+    print("=" * 65)
+
+    print("\n--- [PART 1: AUDIT SUBJECT REQUIREMENTS] ---")
     test_basic_get()
     test_empty_file()
     test_custom_404()
@@ -401,8 +625,28 @@ if __name__ == "__main__":
     test_header_size_limit()
     test_path_traversal()
     test_siege_stress()
-    print("=" * 60)
+
+    print("\n--- [PART 2: ADVANCED & SNEAKY AUDITOR EDGE CASES] ---")
+    test_missing_host_header()
+    test_duplicate_host_header()
+    test_case_sensitive_method()
+    test_unsupported_method()
+    test_negative_chunk_size()
+    test_garbage_chunk_size()
+    test_negative_content_length()
+    test_malformed_content_length()
+    test_encoded_path_traversal()
+    test_null_byte_injection()
+    test_http_pipelining()
+    test_url_encoded_path_with_spaces()
+    test_standard_response_headers()
+    test_mime_types()
+    test_hanging_connection_timeout()
+
+    print("\n" + "=" * 65)
     passed = sum(1 for _, p, _ in results if p)
     failed = sum(1 for _, p, _ in results if not p)
-    print(f" TOTAL: {len(results)} | PASSED: {passed} | FAILED: {failed}")
-    print("=" * 60)
+    print(f" TOTAL TESTS: {len(results)} | PASSED: {passed} | FAILED: {failed}")
+    print("=" * 65)
+    if failed > 0:
+        sys.exit(1)

@@ -9,6 +9,8 @@ public class Router {
         public Path targetPath;
         public boolean isMethodAllowed;
         public boolean isRedirect;
+        public boolean isDirectory;
+        public boolean isForbidden;
     }
 
     public static RouteMatch route(Config.ServerBlock serverBlock, String method, String requestPath) {
@@ -35,7 +37,7 @@ public class Router {
             return match;
         }
 
-        match.isMethodAllowed = bestRule.methods.contains(method.toUpperCase());
+        match.isMethodAllowed = bestRule.methods.contains(method);
         if (!match.isMethodAllowed) {
             return match;
         }
@@ -46,8 +48,18 @@ public class Router {
         }
 
         Path resolved = Paths.get(bestRule.root, subPath).normalize();
+        Path rootAbs = Paths.get(bestRule.root).toAbsolutePath().normalize();
+        Path resolvedAbs = resolved.toAbsolutePath().normalize();
 
-        if (Files.isDirectory(resolved) && bestRule.index != null && !bestRule.index.isEmpty()) {
+        // Detect directory traversal
+        if (!resolvedAbs.startsWith(rootAbs)) {
+            match.isForbidden = true;
+            return match;
+        }
+
+        match.isDirectory = Files.isDirectory(resolved);
+
+        if (match.isDirectory && bestRule.index != null && !bestRule.index.isEmpty()) {
             Path indexPath = resolved.resolve(bestRule.index);
             if (Files.exists(indexPath)) {
                 resolved = indexPath;

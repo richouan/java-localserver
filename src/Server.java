@@ -120,8 +120,8 @@ public class Server {
                     } else if (key.isWritable()) {
                         handleWrite(key); // We can send data back to user
                     }
-                } catch (IOException e) {
-                    System.err.println("Error handling client: " + e.getMessage());
+                } catch (Throwable t) {
+                    System.err.println("Safely handled socket exception: " + t.getMessage());
                     closeClient(key);
                 }
             }
@@ -262,6 +262,17 @@ public class Server {
             return;
         }
 
+        // Dynamically enforce bodyLimit for chunked requests to prevent memory exhaustion
+        if (client.isChunked()) {
+            int bodyWire = client.getRawBytesSize() - client.getHeaderSize();
+            if (bodyWire > serverBlock.bodyLimit + 16384) {
+                client.setKeepAlive(false);
+                sendError(client, serverBlock, 413, "Payload Too Large");
+                key.interestOps(SelectionKey.OP_WRITE);
+                return;
+            }
+        }
+
         if (client.getBodySize() > serverBlock.bodyLimit) {
             sendError(client, serverBlock, 413, "Payload Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
@@ -274,6 +285,9 @@ public class Server {
             if (!isAsyncCgi) {
                 key.interestOps(SelectionKey.OP_WRITE); // Switch to write mode to send the answer
             }
+        } else if (client.isBadRequest()) {
+            sendError(client, serverBlock, 400, "Bad Request");
+            key.interestOps(SelectionKey.OP_WRITE);
         }
     }
 
@@ -310,8 +324,16 @@ public class Server {
         Path rootPath = Paths.get(routeMatch.rule.root).normalize();
 
         // Security check: Don't let users access files outside the root folder
-        if (!filePath.startsWith(rootPath)) {
+        if (routeMatch.isForbidden || !filePath.startsWith(rootPath)) {
             sendError(client, serverBlock, 403, "Forbidden");
+            return false;
+        }
+
+        // Redirect directories missing trailing slash before resolving index/autoindex (only for GET/HEAD)
+        if ("GET".equalsIgnoreCase(client.getMethod()) && routeMatch.isDirectory && !client.getPath().endsWith("/")) {
+            String qs = client.getQueryString();
+            String target = client.getPath() + "/" + (qs != null && !qs.isEmpty() ? "?" + qs : "");
+            client.prepareRedirect(target);
             return false;
         }
 
@@ -525,6 +547,8 @@ public class Server {
                     ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
         } else if (name.endsWith(".pl")) {
             cmd.add("perl");
+        } else if (name.endsWith(".php")) {
+            cmd.add("php-cgi");
         }
         cmd.add(scriptPath.toAbsolutePath().toString());
         return cmd;
@@ -564,6 +588,8 @@ public class Server {
             env.put("CONTENT_LENGTH", String.valueOf(client.getBodySize()));
             env.put("CONTENT_TYPE", client.getHeaders().getOrDefault("content-type", ""));
             env.put("PATH_INFO", client.getPath());
+            env.put("SCRIPT_NAME", client.getPath());
+            env.put("REMOTE_ADDR", "127.0.0.1");
             env.put("SCRIPT_FILENAME", scriptPath.toAbsolutePath().toString());
             env.put("SERVER_PROTOCOL", "HTTP/1.1");
             env.put("GATEWAY_INTERFACE", "CGI/1.1");
@@ -668,6 +694,9 @@ public class Server {
     }
 
     private void handleSession(Client client) {
+        if (this.sessions.size() > 5000) {
+            this.sessions.clear();
+        }
         String sid = getCookieValue(client, "session_id");
         int visits = 1;
 
@@ -796,6 +825,25 @@ public class Server {
         // If we finished sending everything, check if we should keep connection open
         if (client.isKeepAlive()) {
             client.resetForNextRequest();
+            if (client.getRawBytesSize() > 0) {
+                if (!client.areHeadersParsed()) {
+                    client.parseHeaders();
+                }
+                if (client.isBadRequest()) {
+                    sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
+                    key.interestOps(SelectionKey.OP_WRITE);
+                    return;
+                }
+                if (client.areHeadersParsed() && client.isBodyComplete()) {
+                    String hostHeader = client.getHeaders().get("host");
+                    Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
+                    boolean isAsyncCgi = processRequest(client, serverBlock, key);
+                    if (!isAsyncCgi) {
+                        key.interestOps(SelectionKey.OP_WRITE);
+                    }
+                    return;
+                }
+            }
             key.interestOps(SelectionKey.OP_READ); // Switch back to read mode
         } else {
             closeClient(key);
@@ -803,12 +851,20 @@ public class Server {
     }
 
     private String getMimeType(String filename) {
-        if (filename.endsWith(".html") || filename.endsWith(".htm")) return "text/html";
-        if (filename.endsWith(".css")) return "text/css";
-        if (filename.endsWith(".js")) return "application/javascript";
-        if (filename.endsWith(".png")) return "image/png";
-        if (filename.endsWith(".jpg") || filename.endsWith(".jpeg")) return "image/jpeg";
-        if (filename.endsWith(".txt")) return "text/plain";
+        String lower = filename.toLowerCase();
+        if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
+        if (lower.endsWith(".css")) return "text/css";
+        if (lower.endsWith(".js")) return "application/javascript";
+        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".ico")) return "image/x-icon";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".pdf")) return "application/pdf";
+        if (lower.endsWith(".txt")) return "text/plain";
+        if (lower.endsWith(".mp4")) return "video/mp4";
         return "application/octet-stream";
     }
 

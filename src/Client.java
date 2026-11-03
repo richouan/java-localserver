@@ -162,8 +162,9 @@ public class Client {
         }
 
         // Parse the first line (e.g., "GET /index.html HTTP/1.1")
-        String[] requestLine = lines[0].split("\\s+");
-        if (requestLine.length < 3) {
+        String firstLine = lines[0].trim();
+        String[] requestLine = firstLine.split("\\s+");
+        if (requestLine.length != 3) {
             this.isBadRequest = true;
             this.headersParsed = true;
             return true;
@@ -171,17 +172,41 @@ public class Client {
 
         this.method = requestLine[0].trim();
         String fullPath = requestLine[1].trim();
-        
+        this.version = requestLine[2].trim();
+
+        // HTTP Version validation
+        if (!this.version.startsWith("HTTP/")) {
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
+
+        // Security: Disallow null bytes in request URI
+        if (fullPath.contains("\0") || fullPath.contains("%00")) {
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
+
         // Separate path from query string (e.g., /search?q=hello)
         int qIdx = fullPath.indexOf("?");
+        String rawPath;
         if (qIdx != -1) {
-            this.path = fullPath.substring(0, qIdx);
+            rawPath = fullPath.substring(0, qIdx);
             this.queryString = fullPath.substring(qIdx + 1);
         } else {
-            this.path = fullPath;
+            rawPath = fullPath;
             this.queryString = "";
         }
-        this.version = requestLine[2].trim();
+
+        // URL-decode the request path
+        try {
+            this.path = java.net.URLDecoder.decode(rawPath, StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
 
         // Loop through the rest of the lines and store them as Key-Value pairs
         for (int i = 1; i < lines.length; i++) {
@@ -190,7 +215,24 @@ public class Client {
             if (colonIndex != -1) {
                 String key = line.substring(0, colonIndex).trim().toLowerCase();
                 String value = line.substring(colonIndex + 1).trim();
+
+                // RFC 9112 Section 7.2: Reject duplicate Host headers
+                if (key.equals("host") && this.headers.containsKey("host")) {
+                    this.isBadRequest = true;
+                    this.headersParsed = true;
+                    return true;
+                }
+
                 this.headers.put(key, value);
+            }
+        }
+
+        // RFC 9112 Section 7.2: HTTP/1.1 MUST contain a Host header
+        if ("HTTP/1.1".equalsIgnoreCase(this.version)) {
+            if (!this.headers.containsKey("host") || this.headers.get("host").trim().isEmpty()) {
+                this.isBadRequest = true;
+                this.headersParsed = true;
+                return true;
             }
         }
 
@@ -209,13 +251,26 @@ public class Client {
         if (cl != null) {
             try {
                 this.contentLength = Long.parseLong(cl.trim());
+                if (this.contentLength < 0) {
+                    this.isBadRequest = true;
+                    this.headersParsed = true;
+                    return true;
+                }
             } catch (NumberFormatException e) {
-                this.contentLength = 0;
+                this.isBadRequest = true;
+                this.headersParsed = true;
+                return true;
             }
         }
 
         String te = this.headers.get("transfer-encoding");
         this.isChunked = te != null && te.toLowerCase().contains("chunked");
+        if (te != null && !this.isChunked) {
+            // Unsupported Transfer-Encoding
+            this.isBadRequest = true;
+            this.headersParsed = true;
+            return true;
+        }
 
         this.headersParsed = true;
         return true;
@@ -296,6 +351,10 @@ public class Client {
             int chunkSize;
             try {
                 chunkSize = Integer.parseInt(sizeLine, 16);
+                if (chunkSize < 0) {
+                    this.isBadRequest = true;
+                    return false;
+                }
             } catch (NumberFormatException e) {
                 this.isBadRequest = true;
                 return false;
@@ -405,9 +464,16 @@ public class Client {
         this.lastActiveTime = System.currentTimeMillis();
     }
 
+    private String getHttpDate() {
+        return java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+                .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC));
+    }
+
     public void prepareRedirect(String location) {
         StringBuilder res = new StringBuilder();
         res.append("HTTP/1.1 301 Moved Permanently\r\n");
+        res.append("Server: LocalServer/1.0\r\n");
+        res.append("Date: ").append(getHttpDate()).append("\r\n");
         res.append("Location: ").append(location).append("\r\n");
         res.append("Content-Length: 0\r\n");
         res.append("Connection: close\r\n");
@@ -424,6 +490,8 @@ public class Client {
 
         StringBuilder res = new StringBuilder();
         res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
+        res.append("Server: LocalServer/1.0\r\n");
+        res.append("Date: ").append(getHttpDate()).append("\r\n");
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(fileSize).append("\r\n");
         res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
@@ -439,6 +507,8 @@ public class Client {
     public void prepareResponse(int statusCode, String statusText, byte[] bodyBytes, String contentType) {
         StringBuilder res = new StringBuilder();
         res.append("HTTP/1.1 ").append(statusCode).append(" ").append(statusText).append("\r\n");
+        res.append("Server: LocalServer/1.0\r\n");
+        res.append("Date: ").append(getHttpDate()).append("\r\n");
         res.append("Content-Type: ").append(contentType).append("\r\n");
         res.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
         res.append("Connection: ").append(this.keepAlive ? "keep-alive" : "close").append("\r\n");
