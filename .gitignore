@@ -10,3 +10,6 @@ audit_subject.md
 *.class
 TestingSuite.java
 fixes.md
+STUDY_BOOK.md
+docs/*
+doc/*

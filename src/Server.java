@@ -1,4 +1,3 @@
-import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -7,32 +6,25 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public class Server {
-    private Config config;
+    private final Config config;
     private boolean isRunning;
     private Selector selector;
-    private List<ServerSocketChannel> serverChannels;
-    private Map<String, Integer> sessions = new HashMap<>();
-    private long startTime;
+    private final List<ServerSocketChannel> serverChannels;
+    private final long startTime;
     private long requestCount = 0;
-    private ExecutorService cgiExecutor;
+
+    private final SessionManager sessionManager;
+    private final CgiHandler cgiHandler;
+    private final RequestHandler requestHandler;
 
     private static final long TIMEOUT_MS = 30000;
 
@@ -41,17 +33,19 @@ public class Server {
         this.isRunning = false;
         this.serverChannels = new ArrayList<>();
         this.startTime = System.currentTimeMillis();
-        this.cgiExecutor = Executors.newCachedThreadPool();
+        this.sessionManager = new SessionManager();
+        this.cgiHandler = new CgiHandler();
+        this.requestHandler = new RequestHandler(this.sessionManager, this.cgiHandler);
     }
 
     public void start() throws IOException {
-        // The selector is the core of multiplexing (it watches multiple ports at once)
+        // The single selector is the heart of I/O multiplexing (Linux epoll)
         this.selector = Selector.open();
 
         Map<String, Config.ServerBlock> virtualHosts = new HashMap<>();
         Set<Integer> boundPorts = new HashSet<>();
 
-        // Loop through config and open a listening socket for each unique port
+        // Loop through config and open a non-blocking listening socket for each unique port
         for (Config.ServerBlock serverBlock : this.config.getServers()) {
             String vhostKey = serverBlock.host + ":" + serverBlock.port + ":" + serverBlock.serverName.toLowerCase();
             if (virtualHosts.containsKey(vhostKey)) {
@@ -67,10 +61,10 @@ public class Server {
 
             try {
                 ServerSocketChannel ssc = ServerSocketChannel.open();
-                ssc.configureBlocking(false); // Make it non-blocking! Very important for the audit
+                ssc.configureBlocking(false); // Make it non-blocking
                 ssc.bind(new InetSocketAddress(serverBlock.host, serverBlock.port));
 
-                // Tell the selector to wake us up when a new user tries to connect
+                // Register listening socket for OP_ACCEPT
                 ssc.register(this.selector, SelectionKey.OP_ACCEPT);
                 this.serverChannels.add(ssc);
                 boundPorts.add(serverBlock.port);
@@ -87,38 +81,35 @@ public class Server {
 
         this.isRunning = true;
 
-        // The main event loop
+        // The Reactor main event loop
         while (this.isRunning) {
-            // Wait up to 1 second for any activity on the sockets
             int ready = this.selector.select(1000);
 
-            // Clean up clients that have been idle too long
+            // Prune idle sockets
             checkTimeouts();
 
             if (ready == 0) {
-                continue; // No activity, keep looping
+                continue;
             }
 
-            // Get the list of sockets that have activity
             Set<SelectionKey> keys = this.selector.selectedKeys();
             Iterator<SelectionKey> it = keys.iterator();
 
             while (it.hasNext()) {
                 SelectionKey key = it.next();
-                it.remove(); // Must remove it so we don't process it twice
+                it.remove(); // Remove key so it is not processed twice
 
                 if (!key.isValid()) {
                     continue;
                 }
 
                 try {
-                    // Check what kind of activity it is
                     if (key.isAcceptable()) {
-                        handleAccept(key); // New user connecting
+                        handleAccept(key);
                     } else if (key.isReadable()) {
-                        handleRead(key); // User sent us data
+                        handleRead(key);
                     } else if (key.isWritable()) {
-                        handleWrite(key); // We can send data back to user
+                        handleWrite(key);
                     }
                 } catch (Throwable t) {
                     System.err.println("Safely handled socket exception: " + t.getMessage());
@@ -128,33 +119,8 @@ public class Server {
         }
     }
 
-    private Config.ServerBlock resolveServerBlock(SocketChannel channel, String hostHeader) {
-        int localPort = 8080;
-        try {
-            InetSocketAddress localAddr = (InetSocketAddress) channel.getLocalAddress();
-            localPort = localAddr.getPort();
-        } catch (IOException e) {
-        }
-
-        String reqHost = hostHeader;
-        if (reqHost != null && reqHost.contains(":")) {
-            reqHost = reqHost.substring(0, reqHost.indexOf(":")).trim();
-        }
-
-        Config.ServerBlock defaultMatch = null;
-
-        for (Config.ServerBlock block : this.config.getServers()) {
-            if (block.port == localPort) {
-                if (defaultMatch == null) {
-                    defaultMatch = block;
-                }
-                if (reqHost != null && reqHost.equalsIgnoreCase(block.serverName)) {
-                    return block;
-                }
-            }
-        }
-
-        return defaultMatch != null ? defaultMatch : this.config.getServers().get(0);
+    public Config.ServerBlock resolveServerBlock(SocketChannel channel, String hostHeader) {
+        return VHostResolver.resolveServerBlock(this.config, channel, hostHeader);
     }
 
     private void checkTimeouts() {
@@ -178,15 +144,11 @@ public class Server {
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel;
-        
-        // Accept the incoming connection
+
+        // Non-blocking accept loop: drain all pending connections from kernel backlog
         while ((clientChannel = server.accept()) != null) {
-            clientChannel.configureBlocking(false); // Client must also be non-blocking
-            
-            // Create a Client object to keep track of this user's state
+            clientChannel.configureBlocking(false);
             Client client = new Client(clientChannel);
-            
-            // Tell the selector to let us know when this client sends data
             clientChannel.register(this.selector, SelectionKey.OP_READ, client);
         }
     }
@@ -197,9 +159,8 @@ public class Server {
         ByteBuffer buffer = client.getReadBuffer();
 
         buffer.clear();
-        int bytesRead = channel.read(buffer);
+        int bytesRead = channel.read(buffer); // STRICT INVARIANT: Exactly 1 read
 
-        // If bytesRead is -1, the client disconnected
         if (bytesRead == -1) {
             closeClient(key);
             return;
@@ -209,45 +170,41 @@ public class Server {
             return;
         }
 
-        client.updateActivity(); // Reset timeout timer
+        client.updateActivity();
         buffer.flip();
 
-        // Save the raw bytes we just read
         byte[] bytes = new byte[buffer.remaining()];
         buffer.get(bytes);
         client.appendBytes(bytes);
 
-        // Protect against giant headers (malicious attacks)
+        // Header size protection (431)
         if (client.getHeaderSize() > 16384) {
             client.setKeepAlive(false);
-            sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+            this.requestHandler.sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
             return;
         }
 
-        // Try to parse headers if we haven't yet
         if (!client.areHeadersParsed()) {
             if (!client.parseHeaders()) {
                 if (client.getHeaderSize() > 16384) {
                     client.setKeepAlive(false);
-                    sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+                    this.requestHandler.sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
                     key.interestOps(SelectionKey.OP_WRITE);
                 }
-                return; // Headers not fully received yet
+                return;
             }
         }
 
-        // Re-check after parseHeaders established header boundary
         if (client.getHeaderSize() > 16384) {
             client.setKeepAlive(false);
-            sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
+            this.requestHandler.sendError(client, resolveServerBlock(channel, null), 431, "Request Header Fields Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
             return;
         }
 
-        // Check if the request is messed up
         if (client.isBadRequest()) {
-            sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
+            this.requestHandler.sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
             key.interestOps(SelectionKey.OP_WRITE);
             return;
         }
@@ -255,526 +212,39 @@ public class Server {
         String hostHeader = client.getHeaders().get("host");
         Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
 
-        // Block files that are too big based on config
+        // Body limit check (413)
         if (!client.isChunked() && client.getContentLength() > serverBlock.bodyLimit) {
-            sendError(client, serverBlock, 413, "Payload Too Large");
+            this.requestHandler.sendError(client, serverBlock, 413, "Payload Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
             return;
         }
 
-        // Dynamically enforce bodyLimit for chunked requests to prevent memory exhaustion
+        // Dynamically enforce bodyLimit for chunked requests
         if (client.isChunked()) {
             int bodyWire = client.getRawBytesSize() - client.getHeaderSize();
             if (bodyWire > serverBlock.bodyLimit + 16384) {
                 client.setKeepAlive(false);
-                sendError(client, serverBlock, 413, "Payload Too Large");
+                this.requestHandler.sendError(client, serverBlock, 413, "Payload Too Large");
                 key.interestOps(SelectionKey.OP_WRITE);
                 return;
             }
         }
 
         if (client.getBodySize() > serverBlock.bodyLimit) {
-            sendError(client, serverBlock, 413, "Payload Too Large");
+            this.requestHandler.sendError(client, serverBlock, 413, "Payload Too Large");
             key.interestOps(SelectionKey.OP_WRITE);
             return;
         }
 
-        // Once we have the full request, figure out what to do with it
         if (client.isBodyComplete()) {
-            boolean isAsyncCgi = processRequest(client, serverBlock, key);
+            boolean isAsyncCgi = this.requestHandler.processRequest(client, serverBlock, key, this.selector, this);
             if (!isAsyncCgi) {
-                key.interestOps(SelectionKey.OP_WRITE); // Switch to write mode to send the answer
+                key.interestOps(SelectionKey.OP_WRITE);
             }
         } else if (client.isBadRequest()) {
-            sendError(client, serverBlock, 400, "Bad Request");
+            this.requestHandler.sendError(client, serverBlock, 400, "Bad Request");
             key.interestOps(SelectionKey.OP_WRITE);
         }
-    }
-
-    private boolean processRequest(Client client, Config.ServerBlock serverBlock, SelectionKey key) throws IOException {
-        this.requestCount++;
-
-        // Built-in endpoints
-        if ("/status".equals(client.getPath()) || "/metrics".equals(client.getPath())) {
-            handleStatus(client);
-            return false;
-        }
-
-        if ("/session".equals(client.getPath())) {
-            handleSession(client);
-            return false;
-        }
-
-        // Match the request path to a route in our config
-        Router.RouteMatch routeMatch = Router.route(serverBlock, client.getMethod(), client.getPath());
-
-        // Handle redirects (HTTP 301)
-        if (routeMatch.isRedirect) {
-            client.prepareRedirect(routeMatch.rule.redirect);
-            return false;
-        }
-
-        // Check if the user is allowed to use this method (GET, POST, etc)
-        if (!routeMatch.isMethodAllowed) {
-            sendError(client, serverBlock, 405, "Method Not Allowed");
-            return false;
-        }
-
-        Path filePath = routeMatch.targetPath;
-        Path rootPath = Paths.get(routeMatch.rule.root).normalize();
-
-        // Security check: Don't let users access files outside the root folder
-        if (routeMatch.isForbidden || !filePath.startsWith(rootPath)) {
-            sendError(client, serverBlock, 403, "Forbidden");
-            return false;
-        }
-
-        // Redirect directories missing trailing slash before resolving index/autoindex (only for GET/HEAD)
-        if ("GET".equalsIgnoreCase(client.getMethod()) && routeMatch.isDirectory && !client.getPath().endsWith("/")) {
-            String qs = client.getQueryString();
-            String target = client.getPath() + "/" + (qs != null && !qs.isEmpty() ? "?" + qs : "");
-            client.prepareRedirect(target);
-            return false;
-        }
-
-        // If it's a script, run the CGI asynchronously without blocking selector
-        if (("GET".equalsIgnoreCase(client.getMethod()) || "POST".equalsIgnoreCase(client.getMethod())) && isCgi(filePath, routeMatch)) {
-            if (!Files.exists(filePath) || Files.isDirectory(filePath)) {
-                sendError(client, serverBlock, 404, "Not Found");
-                return false;
-            }
-            handleCgiAsync(client, serverBlock, filePath, key);
-            return true;
-        }
-
-        // Handle POST file uploads
-        if ("POST".equalsIgnoreCase(client.getMethod())) {
-            if (routeMatch.rule.uploadDir != null && !routeMatch.rule.uploadDir.isEmpty()) {
-                handleFileUpload(client, serverBlock, routeMatch);
-                return false;
-            }
-
-            String responseBody = "<html><body><h1>200 OK</h1><p>POST body received successfully (" + client.getBodySize() + " bytes).</p></body></html>";
-            client.prepareResponse(200, "OK", responseBody, "text/html");
-            return false;
-        }
-
-        // Handle DELETE requests
-        if ("DELETE".equalsIgnoreCase(client.getMethod())) {
-            if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
-                try {
-                    Files.delete(filePath);
-                    client.prepareResponse(204, "No Content", "", "text/plain");
-                } catch (IOException e) {
-                    sendError(client, serverBlock, 500, "Internal Server Error");
-                }
-            } else {
-                sendError(client, serverBlock, 404, "Not Found");
-            }
-            return false;
-        }
-
-        // Handle folders
-        if (Files.isDirectory(filePath)) {
-            if (!client.getPath().endsWith("/")) {
-                String qs = client.getQueryString();
-                String target = client.getPath() + "/" + (qs != null && !qs.isEmpty() ? "?" + qs : "");
-                client.prepareRedirect(target);
-                return false;
-            }
-
-            if (routeMatch.rule.listing) {
-                // Auto-generate a HTML page showing the folder's files
-                String listingHtml = generateDirectoryListing(filePath.toFile(), client.getPath());
-                client.prepareResponse(200, "OK", listingHtml, "text/html");
-            } else {
-                sendError(client, serverBlock, 403, "Forbidden");
-            }
-            return false;
-        }
-
-        // Serve regular static files (html, css, images)
-        if (Files.exists(filePath)) {
-            String contentType = getMimeType(filePath.toString());
-            client.prepareFileResponse(200, "OK", filePath, contentType);
-        } else {
-            sendError(client, serverBlock, 404, "Not Found");
-        }
-        return false;
-    }
-
-    private static class ParsedMultipart {
-        String filename;
-        byte[] data;
-        ParsedMultipart(String filename, byte[] data) {
-            this.filename = filename;
-            this.data = data;
-        }
-    }
-
-    private ParsedMultipart parseMultipart(byte[] body, String boundary) {
-        try {
-            byte[] boundaryBytes = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
-            int firstBoundary = indexOf(body, boundaryBytes, 0);
-            if (firstBoundary == -1) return null;
-
-            int headerStart = firstBoundary + boundaryBytes.length;
-            if (headerStart + 2 <= body.length && body[headerStart] == '\r' && body[headerStart + 1] == '\n') {
-                headerStart += 2;
-            }
-
-            byte[] headerEndDelim = new byte[] { '\r', '\n', '\r', '\n' };
-            int headerEnd = indexOf(body, headerEndDelim, headerStart);
-            if (headerEnd == -1) return null;
-
-            String partHeaders = new String(body, headerStart, headerEnd - headerStart, StandardCharsets.ISO_8859_1);
-            String filename = null;
-            for (String line : partHeaders.split("\r\n")) {
-                if (line.toLowerCase().startsWith("content-disposition:")) {
-                    int fnIdx = line.indexOf("filename=\"");
-                    if (fnIdx != -1) {
-                        int fnEnd = line.indexOf("\"", fnIdx + 10);
-                        if (fnEnd != -1) {
-                            filename = line.substring(fnIdx + 10, fnEnd);
-                            if (filename.contains("/") || filename.contains("\\")) {
-                                filename = Paths.get(filename).getFileName().toString();
-                            }
-                        }
-                    }
-                }
-            }
-
-            int contentStart = headerEnd + 4;
-            byte[] endBoundaryBytes = ("\r\n--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
-            int contentEnd = indexOf(body, endBoundaryBytes, contentStart);
-            if (contentEnd == -1) {
-                endBoundaryBytes = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
-                contentEnd = indexOf(body, endBoundaryBytes, contentStart);
-            }
-            if (contentEnd == -1 || contentEnd < contentStart) return null;
-
-            byte[] content = Arrays.copyOfRange(body, contentStart, contentEnd);
-            return new ParsedMultipart(filename, content);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private int indexOf(byte[] source, byte[] target, int fromIndex) {
-        if (target.length == 0) return fromIndex;
-        for (int i = fromIndex; i <= source.length - target.length; i++) {
-            boolean match = true;
-            for (int j = 0; j < target.length; j++) {
-                if (source[i + j] != target[j]) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return i;
-        }
-        return -1;
-    }
-
-    private void handleFileUpload(Client client, Config.ServerBlock serverBlock, Router.RouteMatch routeMatch) {
-        try {
-            Path uploadDir = Paths.get(routeMatch.rule.uploadDir).normalize();
-            if (!Files.exists(uploadDir)) {
-                Files.createDirectories(uploadDir);
-            }
-
-            String contentType = client.getHeaders().getOrDefault("content-type", "");
-            byte[] fileBytes = client.getBody();
-            String fileName = null;
-
-            if (contentType.toLowerCase().contains("multipart/form-data")) {
-                int bIdx = contentType.indexOf("boundary=");
-                if (bIdx != -1) {
-                    String boundary = contentType.substring(bIdx + 9).trim();
-                    if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
-                        boundary = boundary.substring(1, boundary.length() - 1);
-                    }
-                    ParsedMultipart mp = parseMultipart(fileBytes, boundary);
-                    if (mp != null) {
-                        if (mp.filename != null && !mp.filename.isEmpty()) {
-                            fileName = mp.filename;
-                        }
-                        fileBytes = mp.data;
-                    }
-                }
-            }
-
-            if (fileName == null || fileName.isEmpty()) {
-                Path target = routeMatch.targetPath;
-                fileName = (target != null && !Files.isDirectory(target) && !target.equals(uploadDir))
-                        ? target.getFileName().toString()
-                        : "upload_" + System.currentTimeMillis() + ".dat";
-            }
-
-            Path destFile = uploadDir.resolve(fileName).normalize();
-            if (!destFile.startsWith(uploadDir)) {
-                sendError(client, serverBlock, 403, "Forbidden");
-                return;
-            }
-
-            Files.write(destFile, fileBytes);
-            String responseHtml = "<html><body><h1>201 Created</h1><p>File uploaded successfully: " + fileName + " (" + fileBytes.length + " bytes)</p><p><a href=\"/listing/\">View Directory Listing</a></p></body></html>";
-            client.prepareResponse(201, "Created", responseHtml, "text/html");
-        } catch (IOException e) {
-            sendError(client, serverBlock, 500, "Internal Server Error");
-        }
-    }
-
-    private boolean isCgi(Path filePath, Router.RouteMatch routeMatch) {
-        if (filePath == null || filePath.getFileName() == null) return false;
-        String name = filePath.getFileName().toString().toLowerCase();
-        if (routeMatch.rule.cgiExtension != null && !routeMatch.rule.cgiExtension.isEmpty()) {
-            if (name.endsWith(routeMatch.rule.cgiExtension.toLowerCase())) {
-                return true;
-            }
-        }
-        return name.endsWith(".py") || name.endsWith(".sh") || name.endsWith(".pl") || name.endsWith(".cgi");
-    }
-
-    private List<String> buildCgiCommand(Path scriptPath) {
-        List<String> cmd = new ArrayList<>();
-        String name = scriptPath.getFileName().toString().toLowerCase();
-        boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
-
-        if (name.endsWith(".py")) {
-            cmd.add(isWin ? "python" : "python3");
-        } else if (name.endsWith(".sh")) {
-            cmd.add(isWin && Files.exists(Paths.get("C:\\Program Files\\Git\\bin\\bash.exe"))
-                    ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
-        } else if (name.endsWith(".pl")) {
-            cmd.add("perl");
-        } else if (name.endsWith(".php")) {
-            cmd.add("php-cgi");
-        }
-        cmd.add(scriptPath.toAbsolutePath().toString());
-        return cmd;
-    }
-
-    private void handleCgiAsync(Client client, Config.ServerBlock serverBlock, Path scriptPath, SelectionKey key) {
-        key.interestOps(0);
-
-        this.cgiExecutor.submit(() -> {
-            try {
-                handleCgi(client, serverBlock, scriptPath);
-            } catch (Exception e) {
-                sendError(client, serverBlock, 500, "Internal Server Error");
-            } finally {
-                try {
-                    if (key.isValid() && client.getChannel().isOpen()) {
-                        key.interestOps(SelectionKey.OP_WRITE);
-                        this.selector.wakeup();
-                    }
-                } catch (Exception ignored) {}
-            }
-        });
-    }
-
-    private void handleCgi(Client client, Config.ServerBlock serverBlock, Path scriptPath) {
-        try {
-            List<String> cmd = buildCgiCommand(scriptPath);
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            if (scriptPath.getParent() != null) {
-                pb.directory(scriptPath.getParent().toFile());
-            }
-
-            // Set up environment variables that CGI scripts need to work properly
-            Map<String, String> env = pb.environment();
-            env.put("REQUEST_METHOD", client.getMethod());
-            env.put("QUERY_STRING", client.getQueryString() != null ? client.getQueryString() : "");
-            env.put("CONTENT_LENGTH", String.valueOf(client.getBodySize()));
-            env.put("CONTENT_TYPE", client.getHeaders().getOrDefault("content-type", ""));
-            env.put("PATH_INFO", client.getPath());
-            env.put("SCRIPT_NAME", client.getPath());
-            env.put("REMOTE_ADDR", "127.0.0.1");
-            env.put("SCRIPT_FILENAME", scriptPath.toAbsolutePath().toString());
-            env.put("SERVER_PROTOCOL", "HTTP/1.1");
-            env.put("GATEWAY_INTERFACE", "CGI/1.1");
-            env.put("REDIRECT_STATUS", "200");
-            env.put("SERVER_NAME", serverBlock.serverName.isEmpty() ? serverBlock.host : serverBlock.serverName);
-            env.put("SERVER_PORT", String.valueOf(serverBlock.port));
-
-            // Pass all HTTP headers to CGI as HTTP_X variables
-            for (Map.Entry<String, String> h : client.getHeaders().entrySet()) {
-                env.put("HTTP_" + h.getKey().toUpperCase().replace("-", "_"), h.getValue());
-            }
-
-            Process p = pb.start();
-
-            // Send the request body to the CGI script if there is one
-            if (client.getBodySize() > 0) {
-                p.getOutputStream().write(client.getBody());
-                p.getOutputStream().flush();
-            }
-            p.getOutputStream().close();
-
-            // Wait up to 5 seconds for the script to finish
-            boolean finished = p.waitFor(5, TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly(); // Kill it if it hangs
-                sendError(client, serverBlock, 504, "Gateway Timeout");
-                return;
-            }
-
-            if (p.exitValue() != 0) {
-                sendError(client, serverBlock, 502, "Bad Gateway");
-                return;
-            }
-
-            // Read what the CGI script printed
-            byte[] output = p.getInputStream().readAllBytes();
-
-            // Locate \r\n\r\n or \n\n delimiter in raw bytes
-            int headerEnd = -1;
-            int delimLen = 0;
-            for (int i = 0; i < output.length - 1; i++) {
-                if (output[i] == '\r' && i + 3 < output.length && output[i + 1] == '\n' && output[i + 2] == '\r' && output[i + 3] == '\n') {
-                    headerEnd = i;
-                    delimLen = 4;
-                    break;
-                } else if (output[i] == '\n' && output[i + 1] == '\n') {
-                    headerEnd = i;
-                    delimLen = 2;
-                    break;
-                }
-            }
-
-            int statusCode = 200;
-            String statusText = "OK";
-            String contentType = "text/html";
-            byte[] bodyBytes;
-
-            if (headerEnd != -1) {
-                String headerPart = new String(output, 0, headerEnd, StandardCharsets.UTF_8);
-                int bodyStart = headerEnd + delimLen;
-                bodyBytes = (bodyStart < output.length) ? Arrays.copyOfRange(output, bodyStart, output.length) : new byte[0];
-
-                // Parse the headers returned by the CGI
-                for (String line : headerPart.split("\r?\n")) {
-                    int colon = line.indexOf(":");
-                    if (colon != -1) {
-                        String name = line.substring(0, colon).trim();
-                        String val = line.substring(colon + 1).trim();
-                        if (name.equalsIgnoreCase("Status")) {
-                            String[] sp = val.split(" ", 2);
-                            try {
-                                statusCode = Integer.parseInt(sp[0]);
-                                if (sp.length > 1) statusText = sp[1];
-                            } catch (NumberFormatException ignored) {}
-                        } else if (name.equalsIgnoreCase("Content-Type")) {
-                            contentType = val;
-                        } else {
-                            client.setResponseHeader(name, val);
-                        }
-                    }
-                }
-            } else {
-                bodyBytes = output;
-            }
-
-            client.prepareResponse(statusCode, statusText, bodyBytes, contentType);
-        } catch (Exception e) {
-            sendError(client, serverBlock, 500, "Internal Server Error");
-        }
-    }
-
-    private String getCookieValue(Client client, String cookieName) {
-        String cookieHeader = client.getHeaders().get("cookie");
-        if (cookieHeader == null) return null;
-        for (String part : cookieHeader.split(";")) {
-            String[] kv = part.trim().split("=");
-            if (kv.length == 2 && kv[0].trim().equals(cookieName)) {
-                return kv[1].trim();
-            }
-        }
-        return null;
-    }
-
-    private void handleSession(Client client) {
-        if (this.sessions.size() > 5000) {
-            this.sessions.clear();
-        }
-        String sid = getCookieValue(client, "session_id");
-        int visits = 1;
-
-        if (sid != null && this.sessions.containsKey(sid)) {
-            visits = this.sessions.get(sid) + 1;
-            this.sessions.put(sid, visits);
-            String html = "<html><body><h1>Session Active</h1><p>Session ID: " + sid + "</p><p>Visits: " + visits + "</p></body></html>";
-            client.prepareResponse(200, "OK", html, "text/html");
-        } else {
-            sid = UUID.randomUUID().toString().substring(0, 8);
-            this.sessions.put(sid, 1);
-            client.setResponseHeader("Set-Cookie", "session_id=" + sid + "; Path=/");
-            String html = "<html><body><h1>New Session Created</h1><p>Session ID: " + sid + "</p><p>Visits: 1</p></body></html>";
-            client.prepareResponse(200, "OK", html, "text/html");
-        }
-    }
-
-    private void handleStatus(Client client) {
-        long uptimeSec = (System.currentTimeMillis() - this.startTime) / 1000;
-        int activeClients = Math.max(0, this.selector.keys().size() - this.serverChannels.size());
-        String html = "<html><head><title>Server Status</title></head><body>"
-                + "<h1>Server Status & Metrics</h1>"
-                + "<p><strong>Uptime:</strong> " + uptimeSec + "s</p>"
-                + "<p><strong>Total Requests:</strong> " + this.requestCount + "</p>"
-                + "<p><strong>Active Connections:</strong> " + activeClients + "</p>"
-                + "<p><strong>Active Sessions:</strong> " + this.sessions.size() + "</p>"
-                + "</body></html>";
-        client.prepareResponse(200, "OK", html, "text/html");
-    }
-
-    private String generateDirectoryListing(File dir, String uriPath) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("<!DOCTYPE html><html><head><title>Index of ").append(uriPath).append("</title></head><body>");
-        sb.append("<h1>Index of ").append(uriPath).append("</h1><hr><ul>");
-
-        if (!uriPath.equals("/")) {
-            sb.append("<li><a href=\"..\">.. (Parent Directory)</a></li>");
-        }
-
-        File[] files = dir.listFiles();
-        if (files != null) {
-            for (File f : files) {
-                String name = f.getName();
-                if (f.isDirectory()) {
-                    name += "/";
-                }
-                sb.append("<li><a href=\"").append(name).append("\">").append(name).append("</a></li>");
-            }
-        }
-
-        sb.append("</ul><hr></body></html>");
-        return sb.toString();
-    }
-
-    private void sendError(Client client, Config.ServerBlock serverBlock, int statusCode, String defaultReason) {
-        if (statusCode >= 400) {
-            client.setKeepAlive(false);
-        }
-
-        String customPath = null;
-        if (serverBlock != null && serverBlock.errorPages.containsKey(statusCode)) {
-            customPath = serverBlock.errorPages.get(statusCode);
-        } else {
-            String defaultErrorFile = "errors/" + statusCode + ".html";
-            if (Files.exists(Paths.get(defaultErrorFile))) {
-                customPath = defaultErrorFile;
-            }
-        }
-
-        if (customPath != null && Files.exists(Paths.get(customPath))) {
-            try {
-                client.prepareFileResponse(statusCode, defaultReason, Paths.get(customPath), "text/html");
-                return;
-            } catch (IOException ignored) {}
-        }
-
-        String fallbackHtml = "<html><body><h1>" + statusCode + " " + defaultReason + "</h1></body></html>";
-        client.prepareResponse(statusCode, defaultReason, fallbackHtml, "text/html");
     }
 
     private void handleWrite(SelectionKey key) throws IOException {
@@ -782,31 +252,29 @@ public class Server {
         SocketChannel channel = client.getChannel();
         ByteBuffer headerBuffer = client.getResponseBuffer();
 
-        // First, send the HTTP headers (e.g., HTTP/1.1 200 OK)
+        // 1. Send HTTP headers
         if (headerBuffer != null && headerBuffer.hasRemaining()) {
             channel.write(headerBuffer);
             client.updateActivity();
             if (headerBuffer.hasRemaining()) {
-                return; // Still more headers to send, come back later
+                return; // Partial write; return to selector
             }
             if (client.getFileChannel() != null && client.getFileBytesRemaining() > 0) {
-                return; // Headers sent; next select cycle will write file chunks
+                return; // Headers completed; next select cycle streams file chunks
             }
         }
 
-        // Then, send the actual file or body if there is one
+        // 2. Stream file body slices if present
         FileChannel fileChannel = client.getFileChannel();
         if (fileChannel != null && client.getFileBytesRemaining() > 0) {
             ByteBuffer fileBuf = client.getReadBuffer();
 
-            // Flush anything left in our temporary buffer
             if (fileBuf.hasRemaining()) {
                 channel.write(fileBuf);
                 client.updateActivity();
-                return; // 1 write per select cycle
+                return; // STRICT INVARIANT: 1 write per select cycle
             }
 
-            // Read a chunk from the file and send it
             fileBuf.clear();
             int readFromFile = fileChannel.read(fileBuf);
             if (readFromFile > 0) {
@@ -814,15 +282,15 @@ public class Server {
                 channel.write(fileBuf);
                 client.decrementFileBytes(readFromFile);
                 client.updateActivity();
-                return; // 1 write per select cycle
+                return; // STRICT INVARIANT: 1 write per select cycle
             }
 
             if (client.getFileBytesRemaining() > 0 || fileBuf.hasRemaining()) {
-                return; // File isn't finished yet, come back later
+                return;
             }
         }
 
-        // If we finished sending everything, check if we should keep connection open
+        // 3. Keep-Alive & Pipelining resolution
         if (client.isKeepAlive()) {
             client.resetForNextRequest();
             if (client.getRawBytesSize() > 0) {
@@ -830,42 +298,24 @@ public class Server {
                     client.parseHeaders();
                 }
                 if (client.isBadRequest()) {
-                    sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
+                    this.requestHandler.sendError(client, resolveServerBlock(channel, null), 400, "Bad Request");
                     key.interestOps(SelectionKey.OP_WRITE);
                     return;
                 }
                 if (client.areHeadersParsed() && client.isBodyComplete()) {
                     String hostHeader = client.getHeaders().get("host");
                     Config.ServerBlock serverBlock = resolveServerBlock(channel, hostHeader);
-                    boolean isAsyncCgi = processRequest(client, serverBlock, key);
+                    boolean isAsyncCgi = this.requestHandler.processRequest(client, serverBlock, key, this.selector, this);
                     if (!isAsyncCgi) {
                         key.interestOps(SelectionKey.OP_WRITE);
                     }
                     return;
                 }
             }
-            key.interestOps(SelectionKey.OP_READ); // Switch back to read mode
+            key.interestOps(SelectionKey.OP_READ);
         } else {
             closeClient(key);
         }
-    }
-
-    private String getMimeType(String filename) {
-        String lower = filename.toLowerCase();
-        if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
-        if (lower.endsWith(".css")) return "text/css";
-        if (lower.endsWith(".js")) return "application/javascript";
-        if (lower.endsWith(".json")) return "application/json";
-        if (lower.endsWith(".png")) return "image/png";
-        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-        if (lower.endsWith(".gif")) return "image/gif";
-        if (lower.endsWith(".svg")) return "image/svg+xml";
-        if (lower.endsWith(".ico")) return "image/x-icon";
-        if (lower.endsWith(".webp")) return "image/webp";
-        if (lower.endsWith(".pdf")) return "application/pdf";
-        if (lower.endsWith(".txt")) return "text/plain";
-        if (lower.endsWith(".mp4")) return "video/mp4";
-        return "application/octet-stream";
     }
 
     private void closeClient(SelectionKey key) {
@@ -876,8 +326,24 @@ public class Server {
             }
             key.cancel();
             key.channel().close();
-        } catch (IOException e) {
-        }
+        } catch (IOException ignored) {}
+    }
+
+    public synchronized void incrementRequestCount() {
+        this.requestCount++;
+    }
+
+    public long getStartTime() {
+        return this.startTime;
+    }
+
+    public synchronized long getRequestCount() {
+        return this.requestCount;
+    }
+
+    public int getActiveClientCount() {
+        if (this.selector == null) return 0;
+        return Math.max(0, this.selector.keys().size() - this.serverChannels.size());
     }
 
     public void stop() {
@@ -887,22 +353,17 @@ public class Server {
             if (ssc != null && ssc.isOpen()) {
                 try {
                     ssc.close();
-                } catch (IOException e) {
-                }
+                } catch (IOException ignored) {}
             }
         }
 
         if (this.selector != null && this.selector.isOpen()) {
             try {
                 this.selector.close();
-            } catch (IOException e) {
-            }
+            } catch (IOException ignored) {}
         }
 
-        if (this.cgiExecutor != null && !this.cgiExecutor.isShutdown()) {
-            this.cgiExecutor.shutdownNow();
-        }
-
+        this.cgiHandler.shutdown();
         System.out.println("Server stopped.");
     }
 }
