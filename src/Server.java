@@ -39,13 +39,12 @@ public class Server {
     }
 
     public void start() throws IOException {
-        // The single selector is the heart of I/O multiplexing (Linux epoll)
+        // the heart of I/O multiplexing (Linux epoll)
         this.selector = Selector.open();
 
         Map<String, Config.ServerBlock> virtualHosts = new HashMap<>();
         Set<Integer> boundPorts = new HashSet<>();
 
-        // Loop through config and open a non-blocking listening socket for each unique port
         for (Config.ServerBlock serverBlock : this.config.getServers()) {
             String vhostKey = serverBlock.host + ":" + serverBlock.port + ":" + serverBlock.serverName.toLowerCase();
             if (virtualHosts.containsKey(vhostKey)) {
@@ -81,7 +80,6 @@ public class Server {
 
         this.isRunning = true;
 
-        // The Reactor main event loop
         while (this.isRunning) {
             int ready = this.selector.select(1000);
 
