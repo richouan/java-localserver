@@ -8,6 +8,8 @@ import urllib.parse
 import urllib.request
 import hashlib
 import concurrent.futures
+import subprocess
+import tempfile
 
 BASE_URL = "http://127.0.0.1:8080"
 HOST = "127.0.0.1"
@@ -19,6 +21,57 @@ def record(test_name, passed, details=""):
     results.append((test_name, passed, details))
     status = " PASS " if passed else " FAIL "
     print(f"[{status}] {test_name}: {details}")
+
+def reserve_local_port():
+    with socket.socket() as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
+
+def get_http_response(port, host, path="/", timeout=3):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Host": host})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(), resp.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+def wait_for_http_response(process, port, host, path="/", timeout=3):
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("Temporary server exited before becoming ready")
+        try:
+            return get_http_response(port, host, path, timeout=0.25)
+        except (OSError, urllib.error.URLError) as e:
+            last_error = e
+            time.sleep(0.05)
+    raise TimeoutError(f"Temporary server did not become ready: {last_error}")
+
+def run_temporary_server(config_text):
+    temp_dir = tempfile.TemporaryDirectory()
+    config_path = os.path.join(temp_dir.name, "test-config.conf")
+    with open(config_path, "w") as config_file:
+        config_file.write(config_text)
+    process = subprocess.Popen(
+        ["java", "-cp", os.path.abspath("bin"), "Main", config_path],
+        cwd=os.getcwd(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return temp_dir, process
+
+def stop_temporary_server(temp_dir, process):
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+    finally:
+        temp_dir.cleanup()
 
 # ============================================================================
 # PART 1: STANDARD AUDIT TESTS
@@ -139,10 +192,15 @@ def test_session_cookies():
         conn.request("GET", "/session", headers={"Host": "localhost", "Cookie": sid_cookie})
         r2 = conn.getresponse()
         body2 = r2.read().decode()
+
+        conn.request("GET", "/session", headers={"Host": "second.com", "Cookie": sid_cookie})
+        r3 = conn.getresponse()
+        body3 = r3.read().decode()
         conn.close()
 
-        ok = "Visits: 1" in body1 and "Visits: 2" in body2
-        record("Session & Cookies", ok, f"Initial={('Visits: 1' in body1)}, Subsequent={('Visits: 2' in body2)}")
+        ok = "Visits: 1" in body1 and "Visits: 2" in body2 and "Visits: 3" in body3
+        record("Session & Cookies (including cross-port cookie reuse)", ok,
+             f"Initial={('Visits: 1' in body1)}, Same port={('Visits: 2' in body2)}, Other port={('Visits: 3' in body3)}")
     except Exception as e:
         record("Session & Cookies", False, str(e))
 
@@ -254,6 +312,91 @@ def test_virtual_host_routing():
     except Exception as e:
         record("Virtual Host & Multi-Port Routing (8080 & 8081 & shared 8080)", False, str(e))
 
+def test_single_server_single_port_config():
+    temp_dir = None
+    process = None
+    try:
+        port = reserve_local_port()
+        root = os.path.abspath("www")
+        config = (
+            "[server]\n"
+            f"host={HOST}\n"
+            f"port={port}\n"
+            "server_name=single.test\n"
+            f"root={root}\n"
+            "[route /]\n"
+            "methods=GET\n"
+            f"root={root}\n"
+            "index=index.html\n"
+        )
+        temp_dir, process = run_temporary_server(config)
+        status, body, _ = wait_for_http_response(process, port, "single.test")
+        ok = status == 200 and b"LocalServer" in body
+        record("Config: Single Server on a Single Port", ok, f"Status={status}")
+    except Exception as e:
+        record("Config: Single Server on a Single Port", False, str(e))
+    finally:
+        if process is not None:
+            stop_temporary_server(temp_dir, process)
+
+def test_bind_failure_preserves_shared_port_servers():
+    temp_dir = None
+    process = None
+    occupied_socket = socket.socket()
+    try:
+        occupied_socket.bind((HOST, 0))
+        occupied_socket.listen(1)
+        occupied_port = occupied_socket.getsockname()[1]
+        shared_port = reserve_local_port()
+        root = os.path.abspath("www")
+        config = (
+            "[server]\n"
+            f"host={HOST}\n"
+            f"port={occupied_port}\n"
+            "server_name=unavailable.test\n"
+            f"root={root}\n"
+            "[server]\n"
+            f"host={HOST}\n"
+            f"port={shared_port}\n"
+            "server_name=first.test\n"
+            f"root={root}\n"
+            "[route /]\n"
+            "methods=GET\n"
+            f"root={root}\n"
+            "index=index.html\n"
+            "[route /redirect]\n"
+            "methods=GET\n"
+            "redirect=/index.html\n"
+            "[server]\n"
+            f"host={HOST}\n"
+            f"port={shared_port}\n"
+            "server_name=second.test\n"
+            f"root={root}\n"
+            "[route /]\n"
+            "methods=GET\n"
+            f"root={root}\n"
+            "index=index.html\n"
+        )
+        temp_dir, process = run_temporary_server(config)
+        wait_for_http_response(process, shared_port, "first.test")
+        conn = http.client.HTTPConnection(HOST, shared_port, timeout=3)
+        conn.request("GET", "/redirect", headers={"Host": "first.test"})
+        first_response = conn.getresponse()
+        first_status = first_response.status
+        first_location = first_response.getheader("Location")
+        first_response.read()
+        conn.close()
+        second_status, _, _ = get_http_response(shared_port, "second.test", "/redirect")
+        ok = first_status == 301 and first_location == "/index.html" and second_status == 404
+        record("Config: Bind Failure Isolation and Same-Port Host Routing", ok,
+               f"first.test redirect={first_status}, second.test redirect={second_status}")
+    except Exception as e:
+        record("Config: Bind Failure Isolation and Same-Port Host Routing", False, str(e))
+    finally:
+        if process is not None:
+            stop_temporary_server(temp_dir, process)
+        occupied_socket.close()
+
 def test_cgi_engines():
     engines = [
         ("Python CGI", "/test.py?foo=bar", "Hello from Python CGI"),
@@ -270,6 +413,50 @@ def test_cgi_engines():
                 record(f"CGI Execution: {name}", ok, f"Status={resp.status}, Expected present={expected in body}")
         except Exception as e:
             record(f"CGI Execution: {name}", False, str(e))
+
+def test_cgi_unchunked_post():
+    try:
+        payload = b"ordinary unchunked CGI body"
+        req = urllib.request.Request(
+            f"{BASE_URL}/test.py",
+            data=payload,
+            headers={"Content-Type": "text/plain", "Host": "localhost"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read()
+            ok = resp.status == 200 and b"Received Body: ordinary unchunked CGI body" in body
+            record("CGI Unchunked POST Body", ok,
+                   f"Status={resp.status}, Body round trip={'passed' if ok else 'failed'}")
+    except Exception as e:
+        record("CGI Unchunked POST Body", False, str(e))
+
+def test_cgi_does_not_block_other_clients():
+    def run_slow_cgi():
+        req = urllib.request.Request(f"{BASE_URL}/timeout.pl", headers={"Host": "localhost"})
+        try:
+            with urllib.request.urlopen(req, timeout=7) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            slow_request = executor.submit(run_slow_cgi)
+            time.sleep(0.2)
+            start = time.monotonic()
+            req = urllib.request.Request(f"{BASE_URL}/empty.html", headers={"Host": "localhost"})
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                quick_status = resp.status
+                resp.read()
+            quick_elapsed = time.monotonic() - start
+            slow_status = slow_request.result(timeout=7)
+
+        ok = quick_status == 200 and quick_elapsed < 2 and slow_status == 504
+        record("CGI Async Isolation (Concurrent Static Request)", ok,
+               f"Static={quick_status} in {quick_elapsed:.2f}s, slow CGI={slow_status}")
+    except Exception as e:
+        record("CGI Async Isolation (Concurrent Static Request)", False, str(e))
 
 def test_chunked_simple():
     try:
@@ -618,7 +805,11 @@ if __name__ == "__main__":
     test_file_upload_retrieve_delete()
     test_multipart_upload()
     test_virtual_host_routing()
+    test_single_server_single_port_config()
+    test_bind_failure_preserves_shared_port_servers()
     test_cgi_engines()
+    test_cgi_unchunked_post()
+    test_cgi_does_not_block_other_clients()
     test_chunked_simple()
     test_chunked_with_crlf_inside()
     test_keepalive_after_chunked()

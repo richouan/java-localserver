@@ -32,7 +32,7 @@ help:
 	@echo "LocalServer Makefile Commands:"
 	@echo "  make        - Compile Java sources into $(BIN_DIR)/"
 	@echo "  make run    - Compile and start LocalServer"
-	@echo "  make test   - Run the 38-test automated audit test suite"
+	@echo "  make test   - Run the 42-test automated audit test suite"
 	@echo "  make clean  - Remove compiled bytecode and $(BIN_DIR)/"
 	@echo "  make re     - Rebuild from scratch"
 

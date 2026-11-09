@@ -79,7 +79,7 @@ Now open your browser and navigate to:
 - **Live Metrics**: [http://localhost:8080/status](http://localhost:8080/status)
 
 ### 3. Run the Test Suite
-The repository includes an exhaustive 38-test automated audit suite testing standard RFC compliance, siege-equivalent stress loads, and sneaky evaluator edge cases:
+The repository includes a 42-test automated audit suite covering standard RFC behavior, configuration isolation, CGI request handling, siege-equivalent stress loads, and evaluator edge cases:
 ```bash
 make test
 ```
@@ -209,7 +209,7 @@ Benchmarked locally using concurrent client workers simulating high-density load
 | :--- | :--- |
 | `make` / `make build` | Compiles Java sources from `src/` into `bin/` |
 | `make run` | Runs the server with `config.conf` |
-| `make test` | Executes the 38-case automated test suite |
+| `make test` | Executes the 42-case automated test suite |
 | `make clean` | Removes compiled `.class` files in `bin/` |
 | `make re` | Performs a clean rebuild (`clean` + `build`) |
 | `make help` | Displays available targets |
