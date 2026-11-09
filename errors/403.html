@@ -1,8 +1,76 @@
 <!DOCTYPE html>
-<html>
-<head><title>403 Forbidden</title></head>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>403 Forbidden — LocalServer</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #0d0d0d; --surface: #111; --border: #222; --border-hi: #333;
+            --fg: #e8e8e8; --muted: #555; --dim: #2a2a2a;
+            --green: #00ff87; --amber: #ffb800; --red: #ff4444; --blue: #4488ff;
+            --mono: 'IBM Plex Mono', monospace; --sans: 'IBM Plex Sans', system-ui, sans-serif;
+        }
+        body {
+            font-family: var(--sans); background: var(--bg); color: var(--fg);
+            min-height: 100vh; display: flex; flex-direction: column;
+        }
+        .topbar {
+            border-bottom: 1px solid var(--border); padding: 0 32px; height: 48px;
+            display: flex; align-items: center; justify-content: space-between;
+            font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+        }
+        .topbar-logo { color: var(--green); font-weight: 700; font-size: 0.8rem; letter-spacing: 0.05em; text-transform: uppercase; }
+        .wrap {
+            flex: 1; display: flex; flex-direction: column; justify-content: center;
+            align-items: flex-start; padding: 80px 32px; max-width: 700px; margin: 0 auto; width: 100%;
+        }
+        .err-code {
+            font-family: var(--mono); font-size: 0.7rem; color: var(--red);
+            letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 20px;
+        }
+        h1 {
+            font-size: clamp(2.5rem, 8vw, 5rem); font-weight: 700;
+            letter-spacing: -0.04em; color: #fff; line-height: 1; margin-bottom: 24px;
+        }
+        h1 span { color: var(--red); }
+        .msg {
+            font-size: 1rem; color: var(--muted); line-height: 1.7;
+            border-left: 2px solid var(--border-hi); padding-left: 16px; margin-bottom: 40px;
+        }
+        .detail {
+            font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+            padding: 16px; border: 1px solid var(--border); background: var(--surface);
+            margin-bottom: 40px; line-height: 1.6;
+        }
+        .back {
+            font-family: var(--mono); font-size: 0.75rem; font-weight: 600;
+            letter-spacing: 0.05em; padding: 10px 20px; border: 1px solid var(--border-hi);
+            color: var(--muted); cursor: pointer; text-decoration: none;
+            text-transform: uppercase; display: inline-flex; align-items: center; gap: 8px;
+            transition: all 0.1s;
+        }
+        .back:hover { border-color: var(--fg); color: var(--fg); }
+        footer {
+            border-top: 1px solid var(--border); padding: 16px 32px;
+            font-family: var(--mono); font-size: 0.7rem; color: var(--muted);
+        }
+    </style>
+</head>
 <body>
-<h1>403 Forbidden</h1>
-<p>You don't have permission to access this resource.</p>
+<nav class="topbar">
+    <span class="topbar-logo">LocalServer</span>
+    <span>HTTP/1.1 &mdash; 403 Forbidden</span>
+</nav>
+<div class="wrap">
+    <div class="err-code">error 403</div>
+    <h1><span>403</span><br>Forbidden</h1>
+    <p class="msg">You don't have permission to access this resource. This may be due to a path traversal attempt or access restrictions configured on this route.</p>
+    <div class="detail">$ curl -I http://127.0.0.1:8080/../../etc/passwd<br><span style="color:#444">HTTP/1.1 403 Forbidden</span></div>
+    <a class="back" href="/">← back to home</a>
+</div>
+<footer>LocalServer · HTTP/1.1 · error 403</footer>
 </body>
 </html>

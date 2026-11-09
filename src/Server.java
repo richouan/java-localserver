@@ -250,7 +250,7 @@ public class Server {
         SocketChannel channel = client.getChannel();
         ByteBuffer headerBuffer = client.getResponseBuffer();
 
-        // 1. Send HTTP headers
+        // 1. Send HTTP heaBoutalebders
         if (headerBuffer != null && headerBuffer.hasRemaining()) {
             channel.write(headerBuffer);
             client.updateActivity();

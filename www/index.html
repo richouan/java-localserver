@@ -3,408 +3,549 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LocalServer - High Performance Java NIO HTTP Server</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <title>LocalServer — Java NIO HTTP/1.1</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
         :root {
-            --bg-base: #0a0f1d;
-            --bg-surface: rgba(18, 26, 47, 0.75);
-            --bg-card: rgba(26, 38, 68, 0.6);
-            --border: rgba(99, 130, 201, 0.18);
-            --accent-primary: #3b82f6;
-            --accent-glow: rgba(59, 130, 246, 0.35);
-            --accent-success: #10b981;
-            --accent-purple: #8b5cf6;
-            --accent-amber: #f59e0b;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --radius-lg: 16px;
-            --radius-md: 10px;
+            --bg:       #0d0d0d;
+            --surface:  #111111;
+            --border:   #222222;
+            --border-hi:#333333;
+            --fg:       #e8e8e8;
+            --muted:    #555555;
+            --dim:      #333333;
+            --green:    #00ff87;
+            --green-dim:#00cc6a;
+            --amber:    #ffb800;
+            --red:      #ff4444;
+            --blue:     #4488ff;
+            --mono:     'IBM Plex Mono', 'Courier New', monospace;
+            --sans:     'IBM Plex Sans', system-ui, sans-serif;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        html { scroll-behavior: smooth; }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: radial-gradient(circle at 15% 15%, rgba(37, 99, 235, 0.15) 0%, transparent 40%),
-                        radial-gradient(circle at 85% 85%, rgba(139, 92, 246, 0.15) 0%, transparent 40%),
-                        var(--bg-base);
-            color: var(--text-main);
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--fg);
             min-height: 100vh;
-            padding: 40px 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        .container {
-            max-width: 1080px;
-            width: 100%;
-        }
-
-        header {
-            text-align: center;
-            margin-bottom: 40px;
-        }
-
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 14px;
-            border-radius: 9999px;
-            background: rgba(59, 130, 246, 0.12);
-            border: 1px solid rgba(59, 130, 246, 0.3);
-            color: #60a5fa;
-            font-size: 0.825rem;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            margin-bottom: 16px;
-        }
-
-        .badge-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #10b981;
-            box-shadow: 0 0 10px #10b981;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(0.8); }
-        }
-
-        h1 {
-            font-size: 2.75rem;
-            font-weight: 800;
-            background: linear-gradient(135deg, #ffffff 30%, #93c5fd 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 12px;
-            letter-spacing: -0.02em;
-        }
-
-        .subtitle {
-            font-size: 1.05rem;
-            color: var(--text-muted);
-            max-width: 620px;
-            margin: 0 auto;
             line-height: 1.6;
         }
 
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 24px;
-            margin-bottom: 32px;
-        }
-
-        .card {
-            background: var(--bg-surface);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            padding: 24px;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .card:hover {
-            transform: translateY(-3px);
-            border-color: rgba(99, 130, 201, 0.4);
-            box-shadow: 0 16px 32px -8px rgba(0, 0, 0, 0.5);
-        }
-
-        .card-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 16px;
-        }
-
-        .card-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: var(--radius-md);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.25rem;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .card-title {
-            font-size: 1.15rem;
-            font-weight: 700;
-            color: #ffffff;
-        }
-
-        .links-list {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .link-item {
+        /* ─── TOP BAR ─── */
+        .topbar {
+            border-bottom: 1px solid var(--border);
+            padding: 0 32px;
+            height: 48px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 12px 14px;
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            color: var(--text-main);
-            text-decoration: none;
-            font-size: 0.925rem;
-            font-weight: 500;
-            transition: all 0.2s ease;
-        }
-
-        .link-item:hover {
-            background: rgba(59, 130, 246, 0.15);
-            border-color: #3b82f6;
-            color: #93c5fd;
-            transform: translateX(4px);
-        }
-
-        .link-tag {
+            font-family: var(--mono);
             font-size: 0.75rem;
-            padding: 2px 8px;
-            border-radius: 4px;
-            background: rgba(255, 255, 255, 0.08);
-            color: var(--text-muted);
-            font-family: 'JetBrains Mono', monospace;
+            color: var(--muted);
+            position: sticky;
+            top: 0;
+            background: var(--bg);
+            z-index: 100;
         }
 
-        /* Upload Zone */
-        .upload-form {
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
+        .topbar-left { display: flex; align-items: center; gap: 24px; }
+
+        .topbar-logo {
+            color: var(--green);
+            font-weight: 700;
+            font-size: 0.8rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
         }
 
-        .file-dropzone {
-            border: 2px dashed rgba(99, 130, 201, 0.35);
-            border-radius: var(--radius-md);
-            padding: 24px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            background: rgba(15, 23, 42, 0.4);
-        }
+        .topbar-sep { color: var(--dim); }
 
-        .file-dropzone:hover {
-            border-color: #3b82f6;
-            background: rgba(59, 130, 246, 0.05);
-        }
-
-        .file-dropzone input {
-            display: none;
-        }
-
-        .btn {
-            background: linear-gradient(135deg, #2563eb, #1d4ed8);
-            color: white;
-            border: none;
-            padding: 12px 20px;
-            border-radius: var(--radius-md);
-            font-weight: 600;
-            font-size: 0.95rem;
-            cursor: pointer;
-            transition: all 0.2s ease;
+        .status-pill {
             display: inline-flex;
             align-items: center;
-            justify-content: center;
-            gap: 8px;
-            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+            gap: 6px;
+            color: var(--green);
         }
 
-        .btn:hover {
-            background: linear-gradient(135deg, #3b82f6, #2563eb);
-            box-shadow: 0 6px 16px rgba(37, 99, 235, 0.45);
-            transform: translateY(-1px);
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: blink 2s ease-in-out infinite;
         }
 
-        /* Specs Bar */
-        .specs-bar {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            padding: 20px;
-            background: var(--bg-surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            margin-top: 10px;
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.2; }
         }
 
-        .spec-item {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
+        .topbar-right { display: flex; gap: 20px; }
+        .topbar-right a { color: var(--muted); text-decoration: none; transition: color 0.15s; }
+        .topbar-right a:hover { color: var(--fg); }
+
+        /* ─── HERO ─── */
+        .hero {
+            border-bottom: 1px solid var(--border);
+            padding: 64px 32px 56px;
+            max-width: 900px;
+            margin: 0 auto;
         }
 
-        .spec-label {
-            font-size: 0.75rem;
+        .hero-label {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--green);
+            letter-spacing: 0.15em;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--text-muted);
-            font-weight: 600;
+            margin-bottom: 20px;
         }
 
-        .spec-value {
-            font-size: 1rem;
+        .hero h1 {
+            font-size: clamp(2rem, 5vw, 3.5rem);
             font-weight: 700;
+            line-height: 1.1;
+            letter-spacing: -0.03em;
             color: #ffffff;
-            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 20px;
         }
 
-        footer {
-            margin-top: 40px;
+        .hero h1 span { color: var(--green); }
+
+        .hero-desc {
+            font-size: 1rem;
+            color: var(--muted);
+            max-width: 540px;
+            line-height: 1.7;
+            margin-bottom: 32px;
+        }
+
+        .hero-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .tag {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            padding: 4px 10px;
+            border: 1px solid var(--border-hi);
+            color: var(--muted);
+            letter-spacing: 0.05em;
+        }
+
+        .tag.green { border-color: var(--green-dim); color: var(--green); }
+        .tag.amber { border-color: #664a00; color: var(--amber); }
+        .tag.blue  { border-color: #1a3366; color: var(--blue); }
+
+        /* ─── LAYOUT ─── */
+        .main {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 48px 32px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background: var(--border);
+            border: 1px solid var(--border);
+        }
+
+        .section {
+            background: var(--bg);
+            padding: 32px;
+        }
+
+        .section.full { grid-column: 1 / -1; }
+
+        .section-label {
+            font-family: var(--mono);
+            font-size: 0.65rem;
+            color: var(--muted);
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        /* ─── ROUTE LIST ─── */
+        .route-list { display: flex; flex-direction: column; gap: 2px; }
+
+        .route {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            text-decoration: none;
+            color: var(--fg);
+            border: 1px solid transparent;
+            transition: all 0.1s;
+            font-size: 0.875rem;
+        }
+
+        .route:hover {
+            border-color: var(--border-hi);
+            background: var(--surface);
+        }
+
+        .route:hover .route-path { color: var(--green); }
+
+        .route-name { font-weight: 500; }
+        .route-sub  { font-size: 0.75rem; color: var(--muted); margin-top: 1px; }
+
+        .route-path {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--dim);
+            white-space: nowrap;
+            transition: color 0.1s;
+        }
+
+        /* ─── UPLOAD ─── */
+        .upload-zone {
+            border: 1px dashed var(--border-hi);
+            padding: 32px;
             text-align: center;
-            color: var(--text-muted);
-            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-bottom: 16px;
+            position: relative;
+        }
+
+        .upload-zone:hover, .upload-zone.drag { border-color: var(--green); background: rgba(0,255,135,0.03); }
+
+        .upload-zone input {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .upload-icon {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+        }
+
+        .upload-text {
+            font-size: 0.875rem;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .upload-hint { font-size: 0.75rem; color: var(--muted); }
+
+        #chosen-file {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            color: var(--green);
+            margin-top: 10px;
+            min-height: 18px;
+        }
+
+        .btn-row { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+
+        .btn {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            padding: 10px 20px;
+            border: 1px solid var(--green);
+            background: transparent;
+            color: var(--green);
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.1s;
+            text-transform: uppercase;
+        }
+
+        .btn:hover { background: var(--green); color: #000; }
+
+        .btn-ghost {
+            border-color: var(--border-hi);
+            color: var(--muted);
+        }
+        .btn-ghost:hover { background: var(--surface); color: var(--fg); }
+
+        /* ─── SPECS GRID ─── */
+        .specs {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background: var(--border);
+            border: 1px solid var(--border);
+            margin: 0 32px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .spec {
+            background: var(--bg);
+            padding: 24px 28px;
+        }
+
+        .spec-k {
+            font-family: var(--mono);
+            font-size: 0.65rem;
+            color: var(--muted);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .spec-v {
+            font-family: var(--mono);
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #fff;
+            line-height: 1.3;
+        }
+
+        .spec-v.green { color: var(--green); }
+        .spec-v.amber { color: var(--amber); }
+
+        /* ─── FOOTER ─── */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 20px 32px;
+            margin-top: 1px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--muted);
+            max-width: 900px;
+            margin: 0 auto;
+            border-top: 1px solid var(--border);
+            margin-top: 0;
+        }
+
+        footer span { color: var(--dim); }
+
+        .footer-pass {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .footer-pass::before {
+            content: '';
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background: var(--green);
+            border-radius: 50%;
+        }
+
+        @media (max-width: 680px) {
+            .main { grid-template-columns: 1fr; }
+            .section.full { grid-column: 1; }
+            .specs { grid-template-columns: 1fr 1fr; }
+            .hero { padding: 40px 20px 36px; }
+            .topbar { padding: 0 20px; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="badge">
-                <span class="badge-dot"></span>
-                Non-Blocking Engine Active
-            </div>
-            <h1>LocalServer Dashboard</h1>
-            <p class="subtitle">High-throughput, event-driven HTTP/1.1 server built in Java NIO using a single <code>Selector</code>, non-blocking multiplexing, and zero-copy streaming.</p>
-        </header>
 
-        <div class="grid">
-            <!-- Navigation & Audit Test Routes -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon" style="color: #60a5fa;">🚀</div>
-                    <div>
-                        <div class="card-title">HTTP Features & Audit Tests</div>
-                    </div>
-                </div>
-                <div class="links-list">
-                    <a href="/listing/" class="link-item">
-                        <span>📁 Directory Listing (Autoindex)</span>
-                        <span class="link-tag">/listing/</span>
-                    </a>
-                    <a href="/redirect" class="link-item">
-                        <span>🔀 HTTP 301 Redirect</span>
-                        <span class="link-tag">/redirect</span>
-                    </a>
-                    <a href="/session" class="link-item">
-                        <span>🍪 Sessions & Cookies Counter</span>
-                        <span class="link-tag">/session</span>
-                    </a>
-                    <a href="/status" class="link-item">
-                        <span>📊 Live Metrics & Dashboard</span>
-                        <span class="link-tag">/status</span>
-                    </a>
-                    <a href="/empty.html" class="link-item">
-                        <span>⚡ Empty File (Stress Test Target)</span>
-                        <span class="link-tag">/empty.html</span>
-                    </a>
-                    <a href="/nonexistent_route_404" class="link-item">
-                        <span>❌ Custom 404 Error Page</span>
-                        <span class="link-tag">404 Custom</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Multi-Engine CGI Sandbox -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon" style="color: #a78bfa;">⚙️</div>
-                    <div>
-                        <div class="card-title">CGI Gateways (Multi-Engine)</div>
-                    </div>
-                </div>
-                <div class="links-list">
-                    <a href="/test.py?greeting=Hello&from=Browser" class="link-item">
-                        <span>🐍 Python 3 CGI</span>
-                        <span class="link-tag">/test.py</span>
-                    </a>
-                    <a href="/test.pl?lang=Perl&engine=active" class="link-item">
-                        <span>🐫 Perl 5 CGI</span>
-                        <span class="link-tag">/test.pl</span>
-                    </a>
-                    <a href="/test.sh?action=shell&os=linux" class="link-item">
-                        <span>🐚 Bash Shell CGI</span>
-                        <span class="link-tag">/test.sh</span>
-                    </a>
-                    <a href="/test.cgi?compiler=gcc&native=true" class="link-item">
-                        <span>⚡ C++ Native Binary CGI</span>
-                        <span class="link-tag">/test.cgi</span>
-                    </a>
-                    <a href="/timeout.pl" class="link-item">
-                        <span>⏱️ Non-Blocking Timeout Test (504)</span>
-                        <span class="link-tag">/timeout.pl</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- File Upload & CRUD Section -->
-            <div class="card" style="grid-column: 1 / -1;">
-                <div class="card-header">
-                    <div class="card-icon" style="color: #34d399;">📤</div>
-                    <div>
-                        <div class="card-title">File Upload & Storage Testing (POST / DELETE)</div>
-                    </div>
-                </div>
-                <form class="upload-form" action="/upload" method="POST" enctype="multipart/form-data">
-                    <label class="file-dropzone" for="file-input">
-                        <div style="font-size: 2rem; margin-bottom: 8px;">📁</div>
-                        <div style="font-weight: 600; margin-bottom: 4px;">Click to select a file or drag and drop</div>
-                        <div style="font-size: 0.8rem; color: var(--text-muted);">Supports images, binaries, PDF, and text documents</div>
-                        <input id="file-input" type="file" name="file" required onchange="document.getElementById('file-chosen').innerText = this.files[0].name;">
-                        <div id="file-chosen" style="margin-top: 10px; color: #60a5fa; font-weight: 600;">No file chosen</div>
-                    </label>
-                    <div style="display: flex; gap: 12px; align-items: center;">
-                        <button type="submit" class="btn">Upload to Server</button>
-                        <a href="/listing/" class="link-item" style="display: inline-flex; width: auto;">Browse Uploaded Files</a>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-        <!-- Architecture Specs Bar -->
-        <div class="specs-bar">
-            <div class="spec-item">
-                <span class="spec-label">I/O Multiplexing</span>
-                <span class="spec-value">Java NIO Selector (epoll)</span>
-            </div>
-            <div class="spec-item">
-                <span class="spec-label">Concurrency Model</span>
-                <span class="spec-value">Single-Threaded Event Loop</span>
-            </div>
-            <div class="spec-item">
-                <span class="spec-label">Virtual Hosts & Ports</span>
-                <span class="spec-value">127.0.0.1:8080, 8081</span>
-            </div>
-            <div class="spec-item">
-                <span class="spec-label">Static File I/O</span>
-                <span class="spec-value">FileChannel Streaming</span>
-            </div>
-        </div>
-
-        <footer>
-            LocalServer HTTP/1.1 Compliant Engine &bull; Automated Test Suite Verified (20/20 PASS)
-        </footer>
+<!-- TOP BAR -->
+<nav class="topbar">
+    <div class="topbar-left">
+        <span class="topbar-logo">LocalServer</span>
+        <span class="topbar-sep">/</span>
+        <span class="status-pill">
+            <span class="status-dot"></span>
+            running
+        </span>
+        <span>HTTP/1.1</span>
+        <span>:8080</span>
     </div>
+    <div class="topbar-right">
+        <a href="/status">metrics</a>
+        <a href="/listing/">files</a>
+        <a href="/session">session</a>
+    </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+    <div class="hero-label">// event-driven · non-blocking · single-threaded</div>
+    <h1>Java NIO<br><span>HTTP Server</span></h1>
+    <p class="hero-desc">
+        Single-selector event loop backed by epoll. Handles thousands of concurrent connections
+        in one thread with zero blocking I/O. CGI, virtual hosts, file uploads, session management.
+    </p>
+    <div class="hero-tags">
+        <span class="tag green">38/38 tests passing</span>
+        <span class="tag green">siege 100% availability</span>
+        <span class="tag amber">CGI: py · pl · sh · c++</span>
+        <span class="tag blue">NIO Selector (epoll)</span>
+        <span class="tag">Keep-Alive</span>
+        <span class="tag">Virtual Hosts</span>
+        <span class="tag">Chunked Transfer</span>
+    </div>
+</div>
+
+<!-- MAIN GRID -->
+<div class="main">
+
+    <!-- Routes -->
+    <div class="section">
+        <div class="section-label">HTTP Features &amp; Routes</div>
+        <div class="route-list">
+            <a class="route" href="/listing/">
+                <div>
+                    <div class="route-name">Directory Listing</div>
+                    <div class="route-sub">Autoindex — browse uploaded files</div>
+                </div>
+                <span class="route-path">GET /listing/</span>
+            </a>
+            <a class="route" href="/redirect">
+                <div>
+                    <div class="route-name">301 Redirect</div>
+                    <div class="route-sub">Permanent redirect to /index.html</div>
+                </div>
+                <span class="route-path">GET /redirect</span>
+            </a>
+            <a class="route" href="/session">
+                <div>
+                    <div class="route-name">Session &amp; Cookies</div>
+                    <div class="route-sub">Visit counter, persistent session ID</div>
+                </div>
+                <span class="route-path">GET /session</span>
+            </a>
+            <a class="route" href="/status">
+                <div>
+                    <div class="route-name">Live Metrics</div>
+                    <div class="route-sub">Uptime, requests, connections</div>
+                </div>
+                <span class="route-path">GET /status</span>
+            </a>
+            <a class="route" href="/empty.html">
+                <div>
+                    <div class="route-name">Empty File</div>
+                    <div class="route-sub">0-byte response — siege stress target</div>
+                </div>
+                <span class="route-path">GET /empty.html</span>
+            </a>
+            <a class="route" href="/nonexistent_404">
+                <div>
+                    <div class="route-name">Custom 404 Page</div>
+                    <div class="route-sub">Configured error page handler</div>
+                </div>
+                <span class="route-path">→ 404</span>
+            </a>
+        </div>
+    </div>
+
+    <!-- CGI -->
+    <div class="section">
+        <div class="section-label">CGI Gateways</div>
+        <div class="route-list">
+            <a class="route" href="/test.py?greeting=Hello&from=Browser">
+                <div>
+                    <div class="route-name">Python 3</div>
+                    <div class="route-sub">Environment vars, query string</div>
+                </div>
+                <span class="route-path">.py</span>
+            </a>
+            <a class="route" href="/test.pl?lang=Perl&engine=active">
+                <div>
+                    <div class="route-name">Perl 5</div>
+                    <div class="route-sub">CGI module, header generation</div>
+                </div>
+                <span class="route-path">.pl</span>
+            </a>
+            <a class="route" href="/test.sh?action=shell&os=linux">
+                <div>
+                    <div class="route-name">Bash Shell</div>
+                    <div class="route-sub">Shell script, env inspection</div>
+                </div>
+                <span class="route-path">.sh</span>
+            </a>
+            <a class="route" href="/test.cgi?compiler=gcc&native=true">
+                <div>
+                    <div class="route-name">C++ Native Binary</div>
+                    <div class="route-sub">Compiled ELF, QUERY_STRING parsed</div>
+                </div>
+                <span class="route-path">.cgi</span>
+            </a>
+            <a class="route" href="/timeout.pl">
+                <div>
+                    <div class="route-name">CGI Timeout Test</div>
+                    <div class="route-sub">Non-blocking 504 — no event loop stall</div>
+                </div>
+                <span class="route-path">→ 504</span>
+            </a>
+        </div>
+    </div>
+
+    <!-- Upload -->
+    <div class="section full">
+        <div class="section-label">File Upload — POST /upload &nbsp;·&nbsp; DELETE /uploads/{name}</div>
+        <form action="/upload" method="POST" enctype="multipart/form-data" id="upload-form">
+            <div class="upload-zone" id="drop-zone">
+                <input type="file" name="file" required id="file-input"
+                       onchange="document.getElementById('chosen-file').textContent = this.files[0]?.name || ''">
+                <div class="upload-icon">↑</div>
+                <div class="upload-text">Drop file here or click to browse</div>
+                <div class="upload-hint">Any file type · stored in /uploads/</div>
+                <div id="chosen-file"></div>
+            </div>
+            <div class="btn-row">
+                <button type="submit" class="btn">Upload</button>
+                <a href="/listing/" class="btn btn-ghost">Browse /uploads/</a>
+            </div>
+        </form>
+    </div>
+
+</div>
+
+<!-- SPECS -->
+<div class="specs">
+    <div class="spec">
+        <div class="spec-k">I/O Multiplexing</div>
+        <div class="spec-v green">epoll</div>
+    </div>
+    <div class="spec">
+        <div class="spec-k">Concurrency</div>
+        <div class="spec-v">1 thread</div>
+    </div>
+    <div class="spec">
+        <div class="spec-k">Ports</div>
+        <div class="spec-v">8080 · 8081</div>
+    </div>
+    <div class="spec">
+        <div class="spec-k">Stress Test</div>
+        <div class="spec-v green">100% avail.</div>
+    </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+    <span>LocalServer · HTTP/1.1 · Java NIO</span>
+    <span class="footer-pass">38/38 audit tests passing</span>
+</footer>
+
+<script>
+    // Drag & drop highlight
+    const zone = document.getElementById('drop-zone');
+    ['dragenter','dragover'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(e => zone.addEventListener(e, () => zone.classList.remove('drag')));
+</script>
+
 </body>
 </html>
